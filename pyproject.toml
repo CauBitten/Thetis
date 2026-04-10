@@ -1,7 +1,7 @@
 [project]
 name = "thetis"
 version = "0.1.0"
-description = "Add your description here"
+description = "Research and implementation of spatio-temporal algorithms for tennis action recognition using the Thetis dataset"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = []

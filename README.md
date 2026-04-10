@@ -62,7 +62,7 @@ Thetis/
 │   └── notes.md              # Anotações de pesquisa
 │
 ├── README.md
-├── requirements.txt
+├── pyproject.toml
 ├── setup.py
 ├── Makefile
 └── .gitignore
@@ -79,11 +79,14 @@ git clone <url-deste-repo> Thetis
 cd Thetis
 ```
 
-### 2. Instalar dependências
+### 2. Instalar dependências com uv
 
 ```bash
-pip install -r requirements.txt
+uv venv
+uv sync
 ```
+
+> Dica: para executar comandos Python sem ativar manualmente o ambiente virtual, use `uv run <comando>`.
 
 ### 3. Clonar o dataset THETIS
 
@@ -98,7 +101,7 @@ git clone https://github.com/THETIS-dataset/dataset dataset
 ```bash
 make preprocess
 # ou diretamente:
-python src/data/loader.py --input dataset/ --output data/processed/
+uv run python src/data/loader.py --input dataset/ --output data/processed/
 ```
 
 ---
@@ -108,19 +111,19 @@ python src/data/loader.py --input dataset/ --output data/processed/
 ### Treinar um modelo
 
 ```bash
-python src/models/spatiotemporal.py --config experiments/configs/stgcn_skeleton3d.yaml
+uv run python src/models/spatiotemporal.py --config experiments/configs/stgcn_skeleton3d.yaml
 ```
 
 ### Avaliar
 
 ```bash
-python src/utils/metrics.py --checkpoint outputs/checkpoints/<run>/best.pt
+uv run python src/utils/metrics.py --checkpoint outputs/checkpoints/<run>/best.pt
 ```
 
 ### Rodar os testes
 
 ```bash
-pytest tests/
+uv run pytest tests/
 ```
 
 ### Comandos via Makefile
@@ -190,20 +193,4 @@ Se este trabalho usar o dataset THETIS, cite:
   pages     = {676--681},
   year      = {2013}
 }
-```
-
----
-
-## .gitignore relevante
-
-```text
-dataset/
-data/
-outputs/checkpoints/
-__pycache__/
-*.pyc
-.ipynb_checkpoints/
-*.egg-info/
-dist/
-.env
 ```
