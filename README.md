@@ -143,7 +143,7 @@ make clean         # limpa logs e arquivos temporários
 Cada arquivo de vídeo segue o padrão `{actor}_{action}_{sequence}.avi`.
 
 | Código no arquivo | Ação |
-|
+| --- | --- |
 | `backhand` | Backhand |
 | `backhand2h` | Backhand com duas mãos |
 | `bslice` | Backhand slice |
