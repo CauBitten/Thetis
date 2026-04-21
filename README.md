@@ -100,9 +100,18 @@ git clone https://github.com/THETIS-dataset/dataset dataset
 
 ```bash
 make preprocess
-# ou diretamente:
-uv run python src/data/loader.py --input dataset/ --output data/processed/
+# ou diretamente (enquanto o Makefile está em implementação):
+uv run python src/data/loader.py --input dataset/ --output data/ --seed 42
 ```
+
+Esse comando cria automaticamente:
+
+- `data/processed/manifest.csv`: tabela por amostra (sujeito, ação, modalidade, sequência, caminho).
+- `data/processed/integrity_report.json`: relatório de integridade e cobertura por modalidade/classe.
+- `data/processed/counts_by_modality_action.csv`: contagens por modalidade e ação.
+- `data/splits/cross_subject.csv`: split por sujeitos (train/val/test).
+- `data/splits/cross_action.csv`: split por ações (train/val/test).
+- `data/splits/split_metadata.json`: metadados de seed e partições.
 
 ---
 

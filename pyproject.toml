@@ -3,5 +3,8 @@ name = "thetis"
 version = "0.1.0"
 description = "Research and implementation of spatio-temporal algorithms for tennis action recognition using the Thetis dataset"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "pandas>=3.0.2",
+]
