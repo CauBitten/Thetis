@@ -1,17 +1,59 @@
-# Thetis — Spatio-Temporal Action Recognition Research
+# Thetis — Few-Shot Action Recognition para Golpes de Tênis
 
-Pesquisa e implementação de algoritmos espaço-temporais para reconhecimento de ações de tênis usando o dataset [THETIS](https://github.com/THETIS-dataset/dataset).
+Pesquisa e implementação de métodos de **Few-Shot Learning (FSL)** aplicados ao reconhecimento de ações específicas em vídeos de tênis. Os experimentos são conduzidos sobre o dataset [THETIS](https://github.com/THETIS-dataset/dataset), adaptado ao protocolo **N-way K-shot** padrão da literatura de Few-Shot Action Recognition (FSAR).
 
 ---
 
-## Sobre o dataset
+## Contexto e motivação
 
-O **THETIS (Three dimEnsional TennIs Shots)** foi capturado com um dispositivo Kinect e contém:
+O reconhecimento de ações em vídeo evoluiu fortemente com arquiteturas profundas treinadas em datasets massivos (Kinetics-400, ~400 classes, ~600k vídeos). Em domínios esportivos específicos, no entanto, a anotação é cara e exige especialistas, e classes vizinhas (por exemplo, *forehand topspin* vs *forehand flat*, ou *saque plano* vs *saque slice*) têm baixa variância visual. Datasets de tênis como o Tennis7 possuem poucas dezenas de exemplos por classe, o que torna inviável o paradigma supervisionado tradicional.
+
+Este projeto investiga como métodos de **Few-Shot Action Recognition** se comportam nesse cenário, com atenção a duas dificuldades específicas do tênis:
+
+- variação de velocidade do mesmo golpe entre jogadores de níveis distintos (iniciante, amador, profissional);
+- granularidade fina entre classes vizinhas, que compartilham boa parte da cinemática.
+
+A avaliação segue o protocolo **N-way K-shot** consolidado por Snell et al. (Prototypical Networks): o modelo recebe N classes novas com K exemplos rotulados (suporte) e classifica consultas dessas classes.
+
+---
+
+## Perguntas de pesquisa
+
+1. Entre os métodos de FSAR recentes, quais entregam melhor desempenho no reconhecimento de golpes específicos de tênis?
+2. Como esses métodos lidam com a variação de velocidade do mesmo golpe entre jogadores de níveis diferentes?
+3. A combinação de **pose 2D**, **fluxo óptico** e **descrições textuais** melhora a discriminação de classes de granularidade fina, em comparação com métodos puramente RGB?
+4. É possível obter desempenho competitivo com apenas 5 exemplos por classe (5-way 5-shot)?
+
+---
+
+## Métodos avaliados
+
+A comparação cobre famílias representativas de FSAR:
+
+| Família | Método | Referência |
+| --- | --- | --- |
+| Metric learning (baseline) | Prototypical Networks | Snell et al. |
+| Cross-attention temporal | TRX | Perrett et al. |
+| Alinhamento multi-velocidade | MVP-Shot | — |
+| Multimodal (vídeo + texto) | SAFSAR | Tang et al. |
+| Baseado em pose | VPD | Hong et al. |
+| Movimento denso | SOAP | — |
+| Atenção bidirecional fina | BAM + CML | — |
+
+A intenção não é propor uma arquitetura nova, mas comparar sistematicamente as abordagens no domínio do tênis.
+
+---
+
+## Dataset experimental: THETIS
+
+Os experimentos usam o **THETIS (Three dimEnsional TennIs Shots)**, capturado com Kinect:
 
 - **8.374 sequências de vídeo**
 - **55 sujeitos**: p1–p31 iniciantes, p32–p55 especialistas
-- **12 classes de ações**: Backhand, Backhand 2 mãos, Backhand slice, Backhand volley, Forehand flat, Forehand open stance, Forehand slice, Forehand volley, Serviço flat, Serviço kick, Serviço slice, Smash
+- **12 classes**: Backhand, Backhand 2 mãos, Backhand slice, Backhand volley, Forehand flat, Forehand open stance, Forehand slice, Forehand volley, Serviço flat, Serviço kick, Serviço slice, Smash
 - **5 modalidades**: RGB, Depth, Mask (silhueta), Skeleton 2D, Skeleton 3D
+
+> **Observação metodológica.** O THETIS, em sua forma original, possui centenas de exemplos por classe e portanto não é, por si só, um benchmark few-shot. Neste projeto ele é usado como base experimental: subamostragens controladas das 12 classes geram episódios **N-way K-shot** (tipicamente 5-way 1-shot e 5-way 5-shot) que simulam o cenário de escassez de dados. A divisão de classes entre meta-train, meta-val e meta-test é detalhada em `experiments/configs/`. A inclusão do Tennis7 como dataset complementar para validação cruzada está prevista.
 
 ---
 
@@ -27,38 +69,55 @@ Thetis/
 │   └── VIDEO_Skelet3D/
 │
 ├── data/                     # Dados processados (não versionados)
-│   ├── processed/            # Features extraídas (esqueletos normalizados, optical flow, etc.)
-│   └── splits/               # Índices de treino / validação / teste
+│   ├── processed/            # Features extraídas: esqueletos normalizados,
+│   │                         # fluxo óptico, embeddings de texto, etc.
+│   └── episodes/             # Episódios N-way K-shot pré-amostrados
+│       ├── meta_train/
+│       ├── meta_val/
+│       └── meta_test/
 │
 ├── src/
 │   ├── data/
-│   │   ├── loader.py         # Carregamento e parsing das sequências
-│   │   └── augment.py        # Aumentação de dados espaço-temporal
+│   │   ├── loader.py         # Parsing das sequências e modalidades
+│   │   ├── episode_sampler.py# Amostragem N-way K-shot (suporte + consulta)
+│   │   └── augment.py        # Aumentação espaço-temporal
+│   ├── features/
+│   │   ├── pose.py           # Extração e normalização de pose 2D
+│   │   ├── optical_flow.py   # Cálculo de fluxo óptico
+│   │   └── text.py           # Embeddings de descrições textuais dos golpes
 │   ├── models/
-│   │   ├── baseline.py       # Baseline (ex: SVM sobre features de esqueleto)
-│   │   └── spatiotemporal.py # Modelos principais (ST-GCN, TCN, etc.)
+│   │   ├── protonet.py       # Baseline: Prototypical Networks
+│   │   ├── trx.py            # TRX (cross-attention temporal)
+│   │   ├── mvp_shot.py       # MVP-Shot (alinhamento multi-velocidade)
+│   │   ├── safsar.py         # SAFSAR (vídeo + texto)
+│   │   └── vpd.py            # Video Pose Distillation
+│   ├── training/
+│   │   ├── meta_trainer.py   # Loop de meta-treino episódico
+│   │   └── eval_episodic.py  # Avaliação N-way K-shot
 │   └── utils/
-│       ├── metrics.py        # Acurácia, F1, matriz de confusão
-│       └── viz.py            # Visualização de sequências e resultados
+│       ├── metrics.py        # Acurácia média por episódio, IC 95%, F1
+│       └── viz.py            # Visualização de episódios e confusões
 │
 ├── notebooks/
-│   ├── 01_eda.ipynb          # Análise exploratória do dataset
-│   └── 02_experiments.ipynb  # Análise de resultados dos experimentos
+│   ├── 01_eda.ipynb          # Análise exploratória do THETIS
+│   ├── 02_episode_design.ipynb # Construção dos splits episódicos
+│   └── 03_results.ipynb      # Análise comparativa entre métodos
 │
 ├── experiments/
-│   ├── configs/              # Um .yaml por configuração de experimento
-│   └── logs/                 # Logs de treinamento (gerados automaticamente)
+│   ├── configs/              # Um .yaml por experimento (método × modalidade × N × K)
+│   └── logs/                 # Logs de meta-treino (gerados automaticamente)
 │
 ├── outputs/
-│   ├── checkpoints/          # Pesos dos modelos salvos (não versionados)
-│   └── results/              # Métricas e plots finais
+│   ├── checkpoints/          # Pesos salvos (não versionados)
+│   └── results/              # Métricas, plots e tabelas comparativas
 │
 ├── tests/
 │   ├── test_data.py
+│   ├── test_episode_sampler.py
 │   └── test_models.py
 │
 ├── docs/
-│   ├── references/           # PDFs de artigos relacionados
+│   ├── references/           # PDFs dos artigos de FSAR
 │   └── notes.md              # Anotações de pesquisa
 │
 ├── README.md
@@ -86,7 +145,7 @@ uv venv
 uv sync
 ```
 
-> Dica: para executar comandos Python sem ativar manualmente o ambiente virtual, use `uv run <comando>`.
+> Para executar comandos Python sem ativar manualmente o ambiente virtual, use `uv run <comando>`.
 
 ### 3. Clonar o dataset THETIS
 
@@ -94,40 +153,64 @@ uv sync
 git clone https://github.com/THETIS-dataset/dataset dataset
 ```
 
-> **Atenção:** o dataset contém vídeos pesados (dezenas de GB). A pasta `dataset/` está no `.gitignore` e **não deve ser versionada**.
+> O dataset contém vídeos pesados (dezenas de GB). A pasta `dataset/` está no `.gitignore` e **não deve ser versionada**.
 
-### 4. Pré-processar os dados
+### 4. Pré-processar dados e extrair modalidades complementares
 
 ```bash
 make preprocess
-# ou diretamente (enquanto o Makefile está em implementação):
+# ou diretamente:
 uv run python src/data/loader.py --input dataset/ --output data/ --seed 42
+uv run python src/features/pose.py         --input data/processed/ --output data/processed/pose/
+uv run python src/features/optical_flow.py --input data/processed/ --output data/processed/flow/
+uv run python src/features/text.py         --output data/processed/text/
 ```
 
-Esse comando cria automaticamente:
+Isso gera, entre outros artefatos:
 
 - `data/processed/manifest.csv`: tabela por amostra (sujeito, ação, modalidade, sequência, caminho).
 - `data/processed/integrity_report.json`: relatório de integridade e cobertura por modalidade/classe.
 - `data/processed/counts_by_modality_action.csv`: contagens por modalidade e ação.
-- `data/splits/cross_subject.csv`: split por sujeitos (train/val/test).
-- `data/splits/cross_action.csv`: split por ações (train/val/test).
-- `data/splits/split_metadata.json`: metadados de seed e partições.
+- `data/processed/pose/`, `data/processed/flow/`, `data/processed/text/`: features das modalidades complementares.
+
+### 5. Construir os splits episódicos
+
+```bash
+uv run python src/data/episode_sampler.py \
+    --manifest data/processed/manifest.csv \
+    --output data/episodes/ \
+    --n-way 5 --k-shot 5 --q-query 15 \
+    --episodes-per-split 1000 \
+    --seed 42
+```
+
+Esse comando produz:
+
+- `data/episodes/meta_train/`, `meta_val/`, `meta_test/`: episódios serializados.
+- `data/episodes/split_metadata.json`: classes em cada partição, seed e parâmetros (N, K, Q).
+
+A divisão de classes entre meta-train/val/test é fixada por configuração para garantir que classes vistas em meta-treino não apareçam em meta-teste.
 
 ---
 
 ## Uso
 
-### Treinar um modelo
+### Meta-treinar um método
 
 ```bash
-uv run python src/models/spatiotemporal.py --config experiments/configs/stgcn_skeleton3d.yaml
+uv run python src/training/meta_trainer.py \
+    --config experiments/configs/protonet_skeleton3d_5w5s.yaml
 ```
 
-### Avaliar
+### Avaliação episódica
 
 ```bash
-uv run python src/utils/metrics.py --checkpoint outputs/checkpoints/<run>/best.pt
+uv run python src/training/eval_episodic.py \
+    --checkpoint outputs/checkpoints/<run>/best.pt \
+    --episodes data/episodes/meta_test/
 ```
+
+A métrica principal é **acurácia média sobre N episódios de teste**, reportada com **intervalo de confiança de 95%**, conforme convenção da literatura de FSAR.
 
 ### Rodar os testes
 
@@ -138,16 +221,17 @@ uv run pytest tests/
 ### Comandos via Makefile
 
 ```bash
-make preprocess    # extrai features do dataset bruto
-make train         # treina com a config padrão
-make eval          # avalia o último checkpoint
+make preprocess    # extrai features e modalidades complementares
+make episodes      # constrói os splits N-way K-shot
+make train         # meta-treina com a config padrão
+make eval          # avalia o último checkpoint em episódios de meta-teste
 make test          # roda a suíte de testes
 make clean         # limpa logs e arquivos temporários
 ```
 
 ---
 
-## Modalidades e convenções de nomenclatura
+## Convenções de nomenclatura do THETIS
 
 Cada arquivo de vídeo segue o padrão `{actor}_{action}_{sequence}.avi`.
 
@@ -168,25 +252,42 @@ Cada arquivo de vídeo segue o padrão `{actor}_{action}_{sequence}.avi`.
 
 ---
 
-## Experimentos
+## Configuração de experimentos
 
-Cada experimento é definido por um arquivo `.yaml` em `experiments/configs/`. Exemplo de configuração:
+Cada experimento é definido por um arquivo `.yaml` em `experiments/configs/`. Exemplo:
 
 ```yaml
-# experiments/configs/stgcn_skeleton3d.yaml
-model: stgcn
-modality: skeleton_3d
-split: cross_subject        # ou cross_action
-epochs: 100
-batch_size: 32
-learning_rate: 0.001
+# experiments/configs/protonet_skeleton3d_5w5s.yaml
+method: protonet              # protonet | trx | mvp_shot | safsar | vpd | ...
+modalities:                   # uma ou mais; SAFSAR usa video + text
+  - skeleton_3d
+episode:
+  n_way: 5
+  k_shot: 5
+  q_query: 15
+  episodes_per_epoch: 200
+  episodes_meta_test: 1000
+optim:
+  epochs: 100
+  batch_size: 1               # batch é o episódio; ajuste conforme método
+  learning_rate: 0.001
 seed: 42
 ```
 
-Os splits seguem a divisão padrão da literatura:
+Cenários previstos:
 
-- **Cross-subject**: treino em parte dos sujeitos, teste no restante.
-- **Cross-action**: treino em parte das ações, teste nas demais.
+- **5-way 1-shot** e **5-way 5-shot**, sobre as 12 classes do THETIS;
+- variantes de modalidade: RGB puro, esqueleto, RGB + pose, RGB + fluxo óptico, RGB + texto (SAFSAR), e combinações;
+- subgrupo de robustez a velocidade: episódios em que o suporte vem de iniciantes (p1–p31) e a consulta de especialistas (p32–p55), e vice-versa.
+
+---
+
+## Contribuição esperada
+
+- Comparação sistemática entre famílias de métodos de FSAR aplicadas ao tênis.
+- Protocolo de avaliação episódica reproduzível sobre o THETIS, com intenção de extensão ao Tennis7.
+- Análise das limitações de cada família frente à variação de velocidade entre jogadores e à granularidade fina entre golpes vizinhos.
+- Avaliação do ganho trazido por modalidades complementares (pose 2D, fluxo óptico, texto) em relação a baselines puramente RGB.
 
 ---
 

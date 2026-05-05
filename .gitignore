@@ -1,17 +1,202 @@
-# Python-generated files
+# =============================================================================
+# Dataset e dados processados (NUNCA versionar — vídeos pesados)
+# =============================================================================
+/dataset/
+/data/
+!/data/.gitkeep
+!/data/README.md
+
+# =============================================================================
+# Saídas de experimentos
+# =============================================================================
+/outputs/checkpoints/
+/outputs/results/
+/experiments/logs/
+!/experiments/logs/.gitkeep
+
+# Wandb / TensorBoard / MLflow
+wandb/
+runs/
+mlruns/
+lightning_logs/
+tb_logs/
+events.out.tfevents.*
+
+# =============================================================================
+# Python
+# =============================================================================
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
 build/
 dist/
+develop-eggs/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
 wheels/
-*.egg-info
+share/python-wheels/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+MANIFEST
 
-# Virtual environments
+# =============================================================================
+# uv / virtualenv
+# =============================================================================
 .venv/
+venv/
+env/
+ENV/
+.python-version
 
-# Dataset
-dataset/
+# uv: lockfile DEVE ser versionado, não ignorar uv.lock
 
-# Processed artifacts
-data/processed/
-data/splits/
+# =============================================================================
+# Testes e cobertura
+# =============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+nosetests.xml
+
+# =============================================================================
+# Type checking / linting
+# =============================================================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# =============================================================================
+# Jupyter / IPython
+# =============================================================================
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+profile_default/
+ipython_config.py
+*.ipynb_meta
+
+# Saídas de notebook (descomente se quiser limpar outputs antes de commitar)
+# *.ipynb
+
+# =============================================================================
+# Pesos de modelo e artefatos pesados
+# =============================================================================
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+
+# =============================================================================
+# Vídeo / imagem / features extraídas (segurança extra além de data/)
+# =============================================================================
+*.avi
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.npy
+*.npz
+
+# =============================================================================
+# Editores e IDEs
+# =============================================================================
+.vscode/
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# =============================================================================
+# Sistema operacional
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# =============================================================================
+# Variáveis de ambiente e segredos
+# =============================================================================
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+secrets.yaml
+secrets.yml
+
+# =============================================================================
+# Logs gerais
+# =============================================================================
+*.log
+logs/
+!/experiments/logs/
+
+# =============================================================================
+# Arquivos temporários
+# =============================================================================
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+.cache/
+
+# =============================================================================
+# Documentação gerada
+# =============================================================================
+/docs/_build/
+/docs/_autosummary/
+site/
+
+# =============================================================================
+# Específicos do projeto
+# =============================================================================
+# PDFs de referência grandes (mantenha apenas notas em docs/notes.md)
+/docs/references/*.pdf
+!/docs/references/.gitkeep
+
+# Arquivos baixados durante experimentos
+scratch/
+tmp/
+playground/
+
+# Claude AI
+/.claude/
