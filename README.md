@@ -176,12 +176,26 @@ Isso gera, entre outros artefatos:
 ### 5. Construir os splits episódicos
 
 ```bash
+make episodes
+# ou diretamente:
 uv run python src/data/episode_sampler.py \
     --manifest data/processed/manifest.csv \
     --output data/episodes/ \
     --n-way 5 --k-shot 5 --q-query 15 \
     --episodes-per-split 1000 \
     --seed 42
+```
+
+Parâmetros do alvo `make episodes` (sobrescreva via linha de comando):
+
+- `N_WAY=5`, `K_SHOT=5`, `Q_QUERY=15`
+- `EPISODES_PER_SPLIT=1000`
+- `MANIFEST=data/processed/manifest.csv`, `EPISODES_DIR=data/episodes/`, `SEED=42`
+
+Exemplo de variação 5-way 1-shot:
+
+```bash
+make episodes K_SHOT=1
 ```
 
 Esse comando produz:
