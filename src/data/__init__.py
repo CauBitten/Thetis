@@ -13,6 +13,7 @@ from src.data.loader import (
 )
 from src.data.episode_sampler import EpisodeSampler, split_classes
 from src.data.augment import (
+    CenterSpatialCrop,
     ColorJitter,
     Compose,
     HorizontalFlip,
@@ -22,6 +23,7 @@ from src.data.augment import (
     RandomScale,
     RandomSpatialCrop,
     RandomTemporalCrop,
+    ResizeVideo,
 )
 
 __all__ = [
@@ -36,6 +38,8 @@ __all__ = [
     'Compose',
     'RandomTemporalCrop',
     'RandomSpatialCrop',
+    'CenterSpatialCrop',
+    'ResizeVideo',
     'HorizontalFlip',
     'ColorJitter',
     'JointJitter',

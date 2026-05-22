@@ -61,55 +61,55 @@ Os experimentos usam o **THETIS (Three dimEnsional TennIs Shots)**, capturado co
 
 ```text
 Thetis/
-├── dataset/                  # Clone do repositório THETIS (não versionado)
+├── dataset/                    # Clone do repositório THETIS (não versionado)
 │   ├── VIDEO_RGB/
 │   ├── VIDEO_Depth/
 │   ├── VIDEO_Mask/
 │   ├── VIDEO_Skelet2D/
 │   └── VIDEO_Skelet3D/
 │
-├── data/                     # Dados processados (não versionados)
-│   ├── processed/            # Features extraídas: esqueletos normalizados,
-│   │                         # fluxo óptico, embeddings de texto, etc.
-│   └── episodes/             # Episódios N-way K-shot pré-amostrados
+├── data/                       # Dados processados (não versionados)
+│   ├── processed/              # Features extraídas: esqueletos normalizados,
+│   │                           # fluxo óptico, embeddings de texto, etc.
+│   └── episodes/               # Episódios N-way K-shot pré-amostrados
 │       ├── meta_train/
 │       ├── meta_val/
 │       └── meta_test/
 │
 ├── src/
 │   ├── data/
-│   │   ├── loader.py         # Parsing das sequências e modalidades
-│   │   ├── episode_sampler.py# Amostragem N-way K-shot (suporte + consulta)
-│   │   └── augment.py        # Aumentação espaço-temporal
+│   │   ├── loader.py           # Parsing das sequências e modalidades
+│   │   ├── episode_sampler.py  # Amostragem N-way K-shot (suporte + consulta)
+│   │   └── augment.py          # Aumentação espaço-temporal
 │   ├── features/
-│   │   ├── pose.py           # Extração e normalização de pose 2D
-│   │   ├── optical_flow.py   # Cálculo de fluxo óptico
-│   │   └── text.py           # Embeddings de descrições textuais dos golpes
+│   │   ├── pose.py             # Extração e normalização de pose 2D
+│   │   ├── optical_flow.py     # Cálculo de fluxo óptico
+│   │   └── text.py             # Embeddings de descrições textuais dos golpes
 │   ├── models/
-│   │   ├── protonet.py       # Baseline: Prototypical Networks
-│   │   ├── trx.py            # TRX (cross-attention temporal)
-│   │   ├── mvp_shot.py       # MVP-Shot (alinhamento multi-velocidade)
-│   │   ├── safsar.py         # SAFSAR (vídeo + texto)
-│   │   └── vpd.py            # Video Pose Distillation
+│   │   ├── protonet.py         # Baseline: Prototypical Networks
+│   │   ├── trx.py              # TRX (cross-attention temporal)
+│   │   ├── mvp_shot.py         # MVP-Shot (alinhamento multi-velocidade)
+│   │   ├── safsar.py           # SAFSAR (vídeo + texto)
+│   │   └── vpd.py              # Video Pose Distillation
 │   ├── training/
-│   │   ├── meta_trainer.py   # Loop de meta-treino episódico
-│   │   └── eval_episodic.py  # Avaliação N-way K-shot
+│   │   ├── meta_trainer.py     # Loop de meta-treino episódico
+│   │   └── eval_episodic.py    # Avaliação N-way K-shot
 │   └── utils/
-│       ├── metrics.py        # Acurácia média por episódio, IC 95%, F1
-│       └── viz.py            # Visualização de episódios e confusões
+│       ├── metrics.py          # Acurácia média por episódio, IC 95%, F1
+│       └── viz.py              # Visualização de episódios e confusões
 │
 ├── notebooks/
-│   ├── 01_eda.ipynb          # Análise exploratória do THETIS
+│   ├── 01_eda.ipynb            # Análise exploratória do THETIS
 │   ├── 02_episode_design.ipynb # Construção dos splits episódicos
-│   └── 03_results.ipynb      # Análise comparativa entre métodos
+│   └── 03_results.ipynb        # Análise comparativa entre métodos
 │
 ├── experiments/
-│   ├── configs/              # Um .yaml por experimento (método × modalidade × N × K)
-│   └── logs/                 # Logs de meta-treino (gerados automaticamente)
+│   ├── configs/                # Um .yaml por experimento (método × modalidade × N × K)
+│   └── logs/                   # Logs de meta-treino (gerados automaticamente)
 │
 ├── outputs/
-│   ├── checkpoints/          # Pesos salvos (não versionados)
-│   └── results/              # Métricas, plots e tabelas comparativas
+│   ├── checkpoints/            # Pesos salvos (não versionados)
+│   └── results/                # Métricas, plots e tabelas comparativas
 │
 ├── tests/
 │   ├── test_data.py
@@ -117,8 +117,8 @@ Thetis/
 │   └── test_models.py
 │
 ├── docs/
-│   ├── references/           # PDFs dos artigos de FSAR
-│   └── notes.md              # Anotações de pesquisa
+│   ├── references/             # PDFs dos artigos de FSAR
+│   └── notes.md                # Anotações de pesquisa
 │
 ├── README.md
 ├── pyproject.toml
@@ -175,56 +175,96 @@ Isso gera, entre outros artefatos:
 
 ### 5. Construir os splits episódicos
 
+O default da Fase 2 é a partição **6/3/3** das 12 classes com **n_way assimétrico** (5-way em meta_train; 3-way em meta_val/meta_test). Esse é o máximo viável dado o orçamento de 12 classes — ver a seção [Splits](#splits) abaixo.
+
 ```bash
-make episodes
+make episodes-6-3-3
 # ou diretamente:
 uv run python src/data/episode_sampler.py \
     --manifest data/processed/manifest.csv \
     --output data/episodes/ \
-    --n-way 5 --k-shot 5 --q-query 15 \
+    --n-way 5 --n-way-val 3 --n-way-test 3 \
+    --k-shot 5 --q-query 15 \
+    --train-classes 6 --val-classes 3 --test-classes 3 \
     --episodes-per-split 1000 \
     --seed 42
 ```
 
 Parâmetros do alvo `make episodes` (sobrescreva via linha de comando):
 
-- `N_WAY=5`, `K_SHOT=5`, `Q_QUERY=15`
+- `N_WAY=5`, `N_WAY_VAL=3`, `N_WAY_TEST=3`, `K_SHOT=5`, `Q_QUERY=15`
 - `EPISODES_PER_SPLIT=1000`
+- `N_TRAIN=6`, `N_VAL=3`, `N_TEST=3`
 - `MANIFEST=data/processed/manifest.csv`, `EPISODES_DIR=data/episodes/`, `SEED=42`
 
-Exemplo de variação 5-way 1-shot:
+Exemplo de variação 1-shot:
 
 ```bash
-make episodes K_SHOT=1
+make episodes-6-3-3 K_SHOT=1
 ```
 
 Esse comando produz:
 
-- `data/episodes/meta_train/`, `meta_val/`, `meta_test/`: episódios serializados.
-- `data/episodes/split_metadata.json`: classes em cada partição, seed e parâmetros (N, K, Q).
+- `data/episodes/meta_train/`, `meta_val/`, `meta_test/`: episódios serializados (JSONL).
+- `data/episodes/split_metadata.json`: classes em cada partição, n_way por split, seed e parâmetros (N, K, Q).
 
 A divisão de classes entre meta-train/val/test é fixada por configuração para garantir que classes vistas em meta-treino não apareçam em meta-teste.
+
+#### Splits
+
+THETIS tem **12 classes**, o que não comporta 5-way em todos os splits ao mesmo tempo. A escolha desta fase:
+
+| Split | Classes | n_way | Justificativa |
+| --- | --- | --- | --- |
+| meta_train | 6 | 5 | Maior n_way viável para reportar como headline. |
+| meta_val | 3 | 3 | Todas as 3 classes em cada episódio (limite duro pelo orçamento). |
+| meta_test | 3 | 3 | Idem. |
+
+Isso registra **n_way_per_split** em `split_metadata.json` e diverge intencionalmente do "5-way puro" da literatura — alternativa seria reduzir tudo para 4-way (4/4/4). A comparação entre métodos continua justa porque todos rodam sob o mesmo protocolo. Tennis7 entra na Fase futura como dataset complementar para reportar 5-way uniforme.
 
 ---
 
 ## Uso
 
-### Meta-treinar um método
+### Meta-treinar o baseline ProtoNet
+
+```bash
+# RGB, 5-way 5-shot (val/test rodam 3-way conforme o split 6/3/3)
+make train TRAIN_CONFIG=experiments/configs/protonet_rgb_5w5s.yaml
+
+# ou diretamente:
+uv run python src/training/meta_trainer.py \
+    --config experiments/configs/protonet_rgb_5w5s.yaml
+```
+
+Smoke-test do pipeline (1 epoch × 2 episódios, encoder com peso aleatório — bom para validar configs novas em segundos):
 
 ```bash
 uv run python src/training/meta_trainer.py \
-    --config experiments/configs/protonet_skeleton3d_5w5s.yaml
+    --config experiments/configs/protonet_rgb_5w5s.yaml \
+    --smoke
 ```
+
+Cada run grava:
+
+- `outputs/checkpoints/<run_id>/{best,last}.pt`
+- `experiments/logs/<run_id>/training.json` (curvas de loss/acc + config + splits)
 
 ### Avaliação episódica
 
 ```bash
+make eval CHECKPOINT=outputs/checkpoints/<run_id>/best.pt
+
+# ou diretamente, escolhendo o JSONL de episódios:
 uv run python src/training/eval_episodic.py \
-    --checkpoint outputs/checkpoints/<run>/best.pt \
-    --episodes data/episodes/meta_test/
+    --checkpoint outputs/checkpoints/<run_id>/best.pt \
+    --episodes data/episodes/meta_test/episodes.jsonl
 ```
 
-A métrica principal é **acurácia média sobre N episódios de teste**, reportada com **intervalo de confiança de 95%**, conforme convenção da literatura de FSAR.
+A métrica principal é **acurácia média sobre N episódios de teste**, reportada com **intervalo de confiança de 95%** (Student-t), conforme convenção da literatura de FSAR. Os resultados ficam em `outputs/results/<run_id>/`:
+
+- `metrics.json`: mean ± IC 95%, acurácias por episódio, lista de classes.
+- `confusion.csv` + `confusion.png`: matriz de confusão por classe canônica.
 
 ### Rodar os testes
 
@@ -235,12 +275,12 @@ uv run pytest tests/
 ### Comandos via Makefile
 
 ```bash
-make preprocess    # extrai features e modalidades complementares
-make episodes      # constrói os splits N-way K-shot
-make train         # meta-treina com a config padrão
-make eval          # avalia o último checkpoint em episódios de meta-teste
-make test          # roda a suíte de testes
-make clean         # limpa logs e arquivos temporários
+make preprocess        # constrói manifest, integrity report e label index
+make episodes-6-3-3    # constrói os splits 6/3/3 com n_way assimétrico (5/3/3)
+make train             # meta-treina (default: ProtoNet RGB 5w5s)
+make eval              # avalia um checkpoint em meta_test
+make test              # roda a suíte de testes
+make clean             # limpa logs e arquivos temporários
 ```
 
 ---

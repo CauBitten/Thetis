@@ -160,6 +160,72 @@ class RandomSpatialCrop:
         return sample
 
 
+class CenterSpatialCrop:
+    '''Deterministic center crop to ``(h, w)``, identical across modalities.'''
+
+    def __init__(self, size: int | tuple[int, int]) -> None:
+        if isinstance(size, int):
+            self.height = self.width = int(size)
+        else:
+            self.height, self.width = int(size[0]), int(size[1])
+        if self.height <= 0 or self.width <= 0:
+            raise ValueError('crop size must be positive')
+
+    def __call__(self, sample: dict[str, Any]) -> dict[str, Any]:
+        keys = _video_keys_present(sample)
+        if not keys:
+            return sample
+        ref = sample[keys[0]]
+        _, h, w, _ = _video_shape(ref)
+        target_h = min(self.height, int(h))
+        target_w = min(self.width, int(w))
+        top = max(0, (int(h) - target_h) // 2)
+        left = max(0, (int(w) - target_w) // 2)
+        for key in keys:
+            video = sample[key]
+            arr = _to_numpy(video)
+            cropped = arr[:, top : top + target_h, left : left + target_w, :]
+            sample[key] = _from_numpy_like(cropped, video)
+        return sample
+
+
+class ResizeVideo:
+    '''Bilinear resize to ``(h, w)``, identical across modalities.
+
+    Uses cv2.resize per frame; output dtype matches input. The first axis
+    (time) is preserved.
+    '''
+
+    def __init__(self, size: int | tuple[int, int]) -> None:
+        if isinstance(size, int):
+            self.height = self.width = int(size)
+        else:
+            self.height, self.width = int(size[0]), int(size[1])
+        if self.height <= 0 or self.width <= 0:
+            raise ValueError('resize size must be positive')
+
+    def __call__(self, sample: dict[str, Any]) -> dict[str, Any]:
+        keys = _video_keys_present(sample)
+        if not keys:
+            return sample
+        try:
+            import cv2  # type: ignore  # noqa: PLC0415
+        except ImportError as exc:
+            raise RuntimeError('ResizeVideo requires opencv-python') from exc
+
+        for key in keys:
+            video = sample[key]
+            arr = _to_numpy(video)
+            T, H, W, C = arr.shape
+            if H == self.height and W == self.width:
+                continue
+            out = np.empty((T, self.height, self.width, C), dtype=arr.dtype)
+            for t in range(T):
+                out[t] = cv2.resize(arr[t], (self.width, self.height), interpolation=cv2.INTER_LINEAR)
+            sample[key] = _from_numpy_like(out, video)
+        return sample
+
+
 class HorizontalFlip:
     '''Flip along width axis with probability ``p``, identical across modalities.
 
@@ -397,6 +463,8 @@ __all__ = [
     'Compose',
     'RandomTemporalCrop',
     'RandomSpatialCrop',
+    'CenterSpatialCrop',
+    'ResizeVideo',
     'HorizontalFlip',
     'ColorJitter',
     'JointJitter',

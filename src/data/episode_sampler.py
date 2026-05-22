@@ -262,7 +262,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Sample N-way K-shot episodes for THETIS FSAR.')
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--n-way', type=int, default=5)
+    parser.add_argument('--n-way', type=int, default=5, help='n_way used in meta_train (default for val/test if not overridden)')
+    parser.add_argument(
+        '--n-way-val',
+        type=int,
+        default=None,
+        help='n_way override for meta_val (default: same as --n-way)',
+    )
+    parser.add_argument(
+        '--n-way-test',
+        type=int,
+        default=None,
+        help='n_way override for meta_test (default: same as --n-way)',
+    )
     parser.add_argument('--k-shot', type=int, default=5)
     parser.add_argument('--q-query', type=int, default=15)
     parser.add_argument('--episodes-per-split', type=int, default=1000)
@@ -306,79 +318,74 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     splits = split_classes(universe, args.train_classes, args.val_classes, args.test_classes, args.seed)
 
-    sampler_unrestricted = EpisodeSampler(
-        manifest_path=args.manifest,
-        n_way=args.n_way,
-        k_shot=args.k_shot,
-        q_query=args.q_query,
-        splits=splits,
-        seed=args.seed,
-        speed_split='none',
-        modality=args.modality,
-        strict=args.strict,
-    )
+    n_way_per_split: dict[str, int] = {
+        'meta_train': int(args.n_way),
+        'meta_val': int(args.n_way_val if args.n_way_val is not None else args.n_way),
+        'meta_test': int(args.n_way_test if args.n_way_test is not None else args.n_way),
+    }
 
     output_root = args.output.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
-    # Pre-flight: any split with fewer classes than n_way is unviable.
+    # Pre-flight: any split with fewer classes than its n_way is unviable.
     eligible_splits: list[str] = []
     for split in SPLIT_NAMES:
         n_classes = len(splits[split])
-        if n_classes < args.n_way:
+        if n_classes < n_way_per_split[split]:
             print(
                 f'warning: skipping split {split!r} — has {n_classes} classes, '
-                f'need n_way={args.n_way}. Use --train/--val/--test-classes or lower --n-way.'
+                f'need n_way={n_way_per_split[split]}. Adjust --train/--val/--test-classes or --n-way-{split.split("_")[1]}.'
             )
             continue
         eligible_splits.append(split)
 
     counts: dict[str, dict[str, int]] = {split: {} for split in SPLIT_NAMES}
+    manifest_sha1_seen: str | None = None
 
-    def _emit(sampler: EpisodeSampler, filename: str) -> None:
+    def _make_sampler(speed_mode: str, n_way: int) -> EpisodeSampler:
+        return EpisodeSampler(
+            manifest_path=args.manifest,
+            n_way=n_way,
+            k_shot=args.k_shot,
+            q_query=args.q_query,
+            splits=splits,
+            seed=args.seed,
+            speed_split=speed_mode,
+            modality=args.modality,
+            strict=args.strict,
+        )
+
+    def _emit(speed_mode: str, filename: str) -> None:
+        nonlocal manifest_sha1_seen
         for split in eligible_splits:
+            sampler = _make_sampler(speed_mode, n_way_per_split[split])
+            if manifest_sha1_seen is None:
+                manifest_sha1_seen = sampler.manifest_sha1
             target = output_root / split / filename
             written = _write_jsonl(target, sampler.iter_episodes(split, args.episodes_per_split))
             counts[split][filename] = written
 
     if args.speed_split in ('none', 'both'):
-        _emit(sampler_unrestricted, 'episodes.jsonl')
+        _emit('none', 'episodes.jsonl')
 
     if args.speed_split in ('beginner_to_expert', 'both'):
-        sampler_b2e = EpisodeSampler(
-            manifest_path=args.manifest,
-            n_way=args.n_way,
-            k_shot=args.k_shot,
-            q_query=args.q_query,
-            splits=splits,
-            seed=args.seed,
-            speed_split='beginner_to_expert',
-            modality=args.modality,
-            strict=args.strict,
-        )
-        _emit(sampler_b2e, 'episodes_speed_b2e.jsonl')
+        _emit('beginner_to_expert', 'episodes_speed_b2e.jsonl')
 
     if args.speed_split in ('expert_to_beginner', 'both'):
-        sampler_e2b = EpisodeSampler(
-            manifest_path=args.manifest,
-            n_way=args.n_way,
-            k_shot=args.k_shot,
-            q_query=args.q_query,
-            splits=splits,
-            seed=args.seed,
-            speed_split='expert_to_beginner',
-            modality=args.modality,
-            strict=args.strict,
-        )
-        _emit(sampler_e2b, 'episodes_speed_e2b.jsonl')
+        _emit('expert_to_beginner', 'episodes_speed_e2b.jsonl')
+
+    if manifest_sha1_seen is None:
+        # No eligible splits — still build a sampler just to compute the manifest hash.
+        manifest_sha1_seen = _make_sampler('none', max(1, args.n_way)).manifest_sha1
 
     metadata = {
-        'schema_version': '1.0',
+        'schema_version': '1.1',
         'generated_at': _dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds'),
-        'manifest_sha1': sampler_unrestricted.manifest_sha1,
+        'manifest_sha1': manifest_sha1_seen,
         'manifest_path': str(Path(args.manifest).resolve()),
         'seed': int(args.seed),
         'n_way': int(args.n_way),
+        'n_way_per_split': n_way_per_split,
         'k_shot': int(args.k_shot),
         'q_query': int(args.q_query),
         'episodes_per_split': int(args.episodes_per_split),
@@ -387,6 +394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         'splits': {
             split: {
                 'n_classes': len(splits[split]),
+                'n_way': n_way_per_split[split],
                 'classes': splits[split],
                 'files': counts[split],
                 'eligible': split in eligible_splits,

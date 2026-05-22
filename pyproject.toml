@@ -3,13 +3,16 @@ name = "thetis"
 version = "0.1.0"
 description = "Research and implementation of spatio-temporal algorithms for tennis action recognition using the Thetis dataset"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
-    "matplotlib>=3.10.8",
+    "matplotlib>=3.8",
     "pandas>=2.2",
     "numpy>=1.26",
     "opencv-python>=4.8",
     "torch>=2.2",
+    "torchvision>=0.17",
+    "pyyaml>=6.0",
+    "scipy>=1.11",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +26,6 @@ dev = [
     "nbformat>=5.10.4",
     "pillow>=12.2.0",
     "pytest>=8",
-    "scipy>=1.17.1",
     "seaborn>=0.13.2",
 ]
 
@@ -31,3 +33,12 @@ dev = [
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu121" }]
+torchvision = [{ index = "pytorch-cu121" }]

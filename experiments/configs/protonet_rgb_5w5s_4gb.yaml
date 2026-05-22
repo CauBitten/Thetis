@@ -1,0 +1,43 @@
+# ProtoNet baseline tuned for 4 GB GPUs (e.g. GTX 1650, MX450).
+# Reduces frames + spatial + encoder batch + enables grad-checkpointing + fp16.
+# Expected VRAM peak: ~2.5-3.0 GB. Slightly worse accuracy than the full config
+# (smaller temporal/spatial receptive field) but lets the pipeline actually run.
+method: protonet
+
+modalities:
+  - rgb
+
+encoder:
+  name: r2plus1d_18
+  pretrained: true
+  batch_size: 2                    # only 2 videos per encoder forward
+  gradient_checkpointing: true     # re-compute activations during backward
+
+episode:
+  n_way: 5
+  n_way_val: 3
+  n_way_test: 3
+  k_shot: 5
+  q_query: 10                      # was 15 — saves 5 query videos per class per episode
+  episodes_per_epoch: 200
+  episodes_meta_val: 100
+  episodes_meta_test: 1000
+
+optim:
+  epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  eval_every: 5
+  fp16: true
+
+data:
+  manifest_path: data/processed/manifest.csv
+  dataset_root: dataset
+  train_classes: 6
+  val_classes: 3
+  test_classes: 3
+  frame_count: 12                  # was 16
+  resize_size: 112                 # was 128
+  spatial_size: 96                 # was 112
+
+seed: 42
