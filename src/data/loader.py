@@ -601,6 +601,28 @@ def _read_video(path: Path, frame_count: int | None) -> np.ndarray:
         return _read_video_cv2(path, frame_count)
 
 
+def _resize_clip(arr: np.ndarray, size: int | tuple[int, int]) -> np.ndarray:
+    '''Bilinear-resize every frame of a ``(T, H, W, C)`` clip to ``size``.
+
+    Mirrors :class:`src.data.augment.ResizeVideo` exactly (per-frame
+    ``cv2.resize`` with ``INTER_LINEAR``), so pre-resizing a clip here and
+    letting a downstream ``ResizeVideo(size)`` become a no-op yields
+    byte-identical results. Used by :class:`ThetisDataset`'s decode cache to
+    store clips at a small working resolution (e.g. 128x128 ~ 1.5 MB / 32
+    frames) instead of native (480x640 ~ 29 MB).
+    '''
+    import cv2  # type: ignore  # noqa: PLC0415
+
+    out_h, out_w = (int(size), int(size)) if isinstance(size, int) else (int(size[0]), int(size[1]))
+    t, h, w, c = arr.shape
+    if h == out_h and w == out_w:
+        return arr
+    out = np.empty((t, out_h, out_w, c), dtype=arr.dtype)
+    for i in range(t):
+        out[i] = cv2.resize(arr[i], (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+    return out
+
+
 class ThetisDataset:
     '''PyTorch-style dataset over the THETIS manifest.
 
@@ -615,6 +637,16 @@ class ThetisDataset:
             If ``None``, returns every frame.
         return_tensors: If True, returns ``torch.Tensor`` objects (lazy import);
             else ``np.ndarray``.
+        cache: If True, memoise each decoded clip in RAM keyed by
+            ``(index, modality)``. Episodic training re-samples the same small
+            class pool thousands of times, so this collapses millions of disk
+            decodes into one-per-clip. Pair with ``cache_resize`` to bound
+            memory. Process-local; defaults to off to keep other callers
+            (and tests) byte-for-byte unchanged.
+        cache_resize: If set, resize decoded clips to this ``(H, W)`` (int →
+            square) *before* caching, matching a downstream
+            :class:`~src.data.augment.ResizeVideo` so results are unchanged
+            while cached clips stay small.
 
     ``__getitem__`` returns a dict with keys
     ``sample_id, label, action_label, action_index, actor, actor_index,
@@ -637,6 +669,8 @@ class ThetisDataset:
         transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         frame_count: int | None = None,
         return_tensors: bool = True,
+        cache: bool = False,
+        cache_resize: int | tuple[int, int] | None = None,
     ) -> None:
         unknown = [m for m in modalities if m not in PATH_COLUMNS]
         if unknown:
@@ -647,6 +681,11 @@ class ThetisDataset:
         self.transform = transform
         self.frame_count = frame_count
         self.return_tensors = return_tensors
+        self.cache_enabled = bool(cache)
+        self.cache_resize = cache_resize
+        # (idx, modality) → decoded uint8 clip; lazily filled so each video is
+        # read from disk at most once for this dataset's lifetime.
+        self._decode_cache: dict[tuple[int, str], np.ndarray] = {}
 
         df = pd.read_csv(
             self.manifest_path,
@@ -668,6 +707,26 @@ class ThetisDataset:
 
         return torch.from_numpy(arr)
 
+    def _load_video_arr(self, idx: int, modality: str) -> np.ndarray:
+        '''Return the decoded ``(T, H, W, 3)`` uint8 clip for ``(idx, modality)``.
+
+        Reads (and optionally resizes) from disk on first request; on later
+        requests returns the cached buffer when ``cache`` is enabled. The
+        returned array is the shared cache buffer — callers that mutate it must
+        copy first (``__getitem__`` does).
+        '''
+        if self.cache_enabled:
+            hit = self._decode_cache.get((idx, modality))
+            if hit is not None:
+                return hit
+        relpath = str(self.df.iloc[idx][PATH_COLUMNS[modality]])
+        arr = _read_video(self.dataset_root / relpath, self.frame_count)
+        if self.cache_resize is not None:
+            arr = _resize_clip(arr, self.cache_resize)
+        if self.cache_enabled:
+            self._decode_cache[(idx, modality)] = arr
+        return arr
+
     def __getitem__(self, idx: int) -> dict[str, Any]:
         row = self.df.iloc[idx]
         sample: dict[str, Any] = {
@@ -681,8 +740,11 @@ class ThetisDataset:
             'sequence_idx': int(row['sequence_idx']),
         }
         for modality in self.modalities:
-            relpath = str(row[PATH_COLUMNS[modality]])
-            arr = _read_video(self.dataset_root / relpath, self.frame_count)
+            arr = self._load_video_arr(idx, modality)
+            if self.cache_enabled:
+                # Hand out a private copy so downstream in-place transforms
+                # never corrupt the shared cache buffer.
+                arr = arr.copy()
             sample[MODALITY_KEY[modality]] = self._to_tensor(arr)
         if self.transform is not None:
             sample = self.transform(sample)

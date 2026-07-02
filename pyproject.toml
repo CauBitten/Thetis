@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Research and implementation of spatio-temporal algorithms for tennis action recognition using the Thetis dataset"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
+
 dependencies = [
     "matplotlib>=3.8",
     "pandas>=2.2",
@@ -16,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-fast = ["decord>=0.6"]
+fast = ["decord>=0.6; sys_platform == 'linux'"]
 
 [dependency-groups]
 dev = [
@@ -39,6 +40,16 @@ name = "pytorch-cu121"
 url = "https://download.pytorch.org/whl/cu121"
 explicit = true
 
+[tool.uv]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu121" }]
-torchvision = [{ index = "pytorch-cu121" }]
+torch = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]

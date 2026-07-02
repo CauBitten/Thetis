@@ -265,10 +265,16 @@ def _run_eval(
     n_way: int,
     device: torch.device,
     use_amp: bool = False,
-) -> tuple[float, float]:
-    '''Run ``n_episodes`` episodes from ``split`` and return ``(mean_acc, ci_half_width)``.'''
+) -> tuple[float, float, float]:
+    '''Run ``n_episodes`` from ``split``; return ``(mean_acc, ci_half_width, mean_loss)``.
+
+    The ProtoNet forward already computes the query cross-entropy, so ``mean_loss``
+    is essentially free here — it just averages ``out['loss']`` across episodes.
+    Useful to catch overfitting when val_acc plateaus but val_loss creeps back up.
+    '''
     model.eval()
     accs: list[float] = []
+    losses: list[float] = []
     autocast_ctx = (
         torch.amp.autocast(device_type='cuda', dtype=torch.float16)
         if use_amp and device.type == 'cuda'
@@ -286,8 +292,10 @@ def _run_eval(
                 n_way=n_way,
             )
             accs.append(out['accuracy'])
+            losses.append(float(out['loss'].detach()))
     mean, ci = accuracy_with_ci(accs)
-    return mean, ci
+    mean_loss = float(np.mean(losses)) if losses else float('nan')
+    return mean, ci, mean_loss
 
 
 def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> dict[str, Any]:
@@ -363,6 +371,18 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
     train_transform = build_train_transform(data_cfg, seed)
     eval_transform = build_eval_transform(data_cfg)
 
+    # In-memory decode cache: episodic sampling re-draws the same small class
+    # pool (~990 RGB clips over 6 meta_train classes) thousands of times, so the
+    # serial per-episode video decode — not the GPU — is the real bottleneck.
+    # Decoding each clip once and resizing it up front to resize_size (matching
+    # the ResizeVideo step in the transforms, so results are byte-identical)
+    # serves every later access from RAM. Cached clips are ~1.5 MB at 128^2 vs
+    # ~29 MB at native 480x640, so the full train+val pool fits in ~1.9 GB.
+    # Disable via data.cache_decoded=false if RAM-constrained.
+    resize_size = int(data_cfg.get('resize_size', 128))
+    cache_decoded = bool(data_cfg.get('cache_decoded', True))
+    cache_resize = resize_size if cache_decoded else None
+
     train_dataset = ThetisDataset(
         manifest_path=manifest_path,
         modalities=[modality],
@@ -370,6 +390,8 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
         transform=None,  # transform applied inside EpisodeLoader to keep eval-vs-train clean
         frame_count=frame_count * 2 if not smoke else frame_count,  # over-sample then temporal-crop
         return_tensors=True,
+        cache=cache_decoded,
+        cache_resize=cache_resize,
     )
     eval_dataset = ThetisDataset(
         manifest_path=manifest_path,
@@ -378,6 +400,8 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
         transform=None,
         frame_count=frame_count,
         return_tensors=True,
+        cache=cache_decoded,
+        cache_resize=cache_resize,
     )
 
     train_loader = EpisodeLoader(train_dataset, modality=modality, transform=train_transform)
@@ -434,6 +458,11 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
         f'grad_checkpoint={use_checkpointing} '
         f'n_way_train={n_way_train} n_way_val={n_way_val} k_shot={k_shot} q_query={q_query} '
         f'episodes_per_epoch={episodes_per_epoch} epochs={epochs} smoke={smoke}',
+        flush=True,
+    )
+    print(
+        f'[setup] decode_cache={cache_decoded} cache_resize={cache_resize} '
+        f'(each clip decoded from disk once at epoch 1, then served from RAM)',
         flush=True,
     )
     print(f'[setup] splits = {splits}', flush=True)
@@ -516,11 +545,12 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
         run_eval = val_sampler is not None and (epoch == epochs or epoch % eval_every == 0 or smoke)
         if run_eval and val_sampler is not None:
             print(f'[epoch {epoch}] running val eval ({episodes_meta_val} episodes)...', flush=True)
-            val_mean, val_ci = _run_eval(
+            val_mean, val_ci, val_loss = _run_eval(
                 model, val_sampler, eval_loader, 'meta_val', episodes_meta_val, n_way_val, device, use_amp=use_amp
             )
             epoch_record['val_acc'] = val_mean
             epoch_record['val_ci95'] = val_ci
+            epoch_record['val_loss'] = val_loss
             if val_mean > best_val:
                 best_val = val_mean
                 log['best_val_acc'] = val_mean
@@ -532,16 +562,24 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
                         'optimizer_state': optimizer.state_dict(),
                         'val_acc': val_mean,
                         'val_ci95': val_ci,
+                        'val_loss': val_loss,
                         'config': cfg,
                     },
                     ckpt_dir / 'best.pt',
                 )
 
-        print(
+        summary = (
             f'epoch {epoch:>3}/{epochs} | train_loss={epoch_record["train_loss"]:.4f} '
             f'train_acc={epoch_record["train_acc"]:.4f}'
-            + (f' val_acc={epoch_record.get("val_acc", float("nan")):.4f}' if 'val_acc' in epoch_record else '')
         )
+        if 'val_acc' in epoch_record:
+            summary += (
+                f' | val_loss={epoch_record["val_loss"]:.4f} '
+                f'val_acc={epoch_record["val_acc"]:.4f}'
+            )
+        if best_val > float('-inf'):
+            summary += f' | best_val={best_val:.4f} @ep{log["best_epoch"]}'
+        print(summary)
         log['epochs'].append(epoch_record)
 
     torch.save(

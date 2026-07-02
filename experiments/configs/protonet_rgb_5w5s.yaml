@@ -10,7 +10,7 @@ encoder:
   # batch_size controls chunked-encoding: how many videos go through the
   # encoder per forward. Lower it if you hit CUDA OOM. Auto-picks 4 (<=6 GB),
   # 8 (<=10 GB), 16 (<=16 GB), 32 (>16 GB) when omitted.
-  # batch_size: 4
+  batch_size: 8
   # gradient_checkpointing auto-enables on <=6 GB GPUs; force on/off here.
   # gradient_checkpointing: true
 
@@ -40,5 +40,10 @@ data:
   frame_count: 16
   resize_size: 128
   spatial_size: 112
+  # Decode each clip once, resize to resize_size, then serve from RAM. Episodic
+  # sampling reuses the same ~990-clip train pool thousands of times, so this
+  # removes the dominant video-decode bottleneck (results are unchanged). Costs
+  # ~1.9 GB RAM at 128^2. Set false only if memory-constrained.
+  cache_decoded: true
 
 seed: 42

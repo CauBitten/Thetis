@@ -121,6 +121,13 @@ def run_eval(
     model.eval()
 
     eval_transform = build_eval_transform(cfg['data'])
+    # Same decode cache as training: meta_test re-samples the small test-class
+    # pool (~495 clips) across ~1000 episodes, so caching each clip once —
+    # resized to resize_size, which matches build_eval_transform's ResizeVideo,
+    # so results are byte-identical — removes the redundant-decode cost (~0.4 GB
+    # RAM). Honours data.cache_decoded from the saved config (default on).
+    resize_size = int(cfg['data'].get('resize_size', 128))
+    cache_decoded = bool(cfg['data'].get('cache_decoded', True))
     dataset = ThetisDataset(
         manifest_path=Path(cfg['data']['manifest_path']).resolve(),
         modalities=[modality],
@@ -128,6 +135,8 @@ def run_eval(
         transform=None,
         frame_count=int(cfg['data'].get('frame_count', 16)),
         return_tensors=True,
+        cache=cache_decoded,
+        cache_resize=resize_size if cache_decoded else None,
     )
     loader = EpisodeLoader(dataset, modality=modality, transform=eval_transform)
 
