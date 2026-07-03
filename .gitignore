@@ -9,10 +9,12 @@
 # =============================================================================
 # Saídas de experimentos
 # =============================================================================
+# Pesos e resultados brutos: NÃO versionar (pesados, reprodutíveis).
+# Já os logs de métricas (experiments/logs/**/*.json) SÃO versionados —
+# ver seção "Logs gerais". Binários que caiam em logs/ (*.pt, tfevents)
+# continuam barrados pelos globs globais mais abaixo.
 /outputs/checkpoints/
 /outputs/results/
-/experiments/logs/
-!/experiments/logs/.gitkeep
 
 # Wandb / TensorBoard / MLflow
 wandb/
@@ -167,6 +169,8 @@ secrets.yml
 # =============================================================================
 *.log
 logs/
+# Exceção: métricas de experimento (JSON) são versionadas.
+# Pesos/tfevents dentro de logs/ seguem barrados pelos globs de artefatos.
 !/experiments/logs/
 
 # =============================================================================
