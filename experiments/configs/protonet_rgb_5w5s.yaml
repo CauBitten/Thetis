@@ -11,8 +11,10 @@ encoder:
   # encoder per forward. Lower it if you hit CUDA OOM. Auto-picks 4 (<=6 GB),
   # 8 (<=10 GB), 16 (<=16 GB), 32 (>16 GB) when omitted.
   batch_size: 8
-  # gradient_checkpointing auto-enables on <=6 GB GPUs; force on/off here.
-  # gradient_checkpointing: true
+  # Re-compute activations during backward (~70% less activation VRAM, ~25-30%
+  # slower/step). Auto-enables on <=6 GB GPUs; forced on here so R(2+1)D-18 also
+  # fits comfortably on mid-size GPUs. Comment out if optim.stream_query alone fits.
+  gradient_checkpointing: true
 
 episode:
   n_way: 5
@@ -30,6 +32,7 @@ optim:
   weight_decay: 0.0
   eval_every: 5
   fp16: true  # autocast mixed precision (CUDA only); halves activation memory
+  stream_query: true  # stream query in micro-batches w/ grad accumulation (bounds VRAM)
 
 data:
   manifest_path: data/processed/manifest.csv

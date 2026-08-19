@@ -327,3 +327,75 @@ def test_episode_loader_returns_stacked_tensor() -> None:
     assert int(out[0, 0, 0, 0, 0]) == 1
     assert int(out[1, 0, 0, 0, 0]) == 2
     assert int(out[2, 0, 0, 0, 0]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Streaming grad-accumulation ≡ classic full-batch step
+# ---------------------------------------------------------------------------
+
+
+def _mini_episode() -> dict[str, torch.Tensor]:
+    '''Tiny 2-way / 2-shot / 4-query episode of per-class solid-colour clips.'''
+    rng = np.random.default_rng(3)
+    colors = rng.integers(30, 220, size=(2, 3)).astype(np.uint8)
+    support = np.stack(
+        [np.broadcast_to(colors[c], (4, 6, 6, 3)) for c in range(2) for _ in range(2)]
+    ).astype(np.uint8)
+    query = np.stack(
+        [np.broadcast_to(colors[c], (4, 6, 6, 3)) for c in range(2) for _ in range(4)]
+    ).astype(np.uint8)
+    return {
+        'support': torch.from_numpy(support),
+        'query': torch.from_numpy(query),
+        'support_labels': torch.tensor([0, 0, 1, 1], dtype=torch.long),
+        'query_labels': torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.long),
+    }
+
+
+def _build_protonet() -> Any:
+    from src.models.protonet import ProtoNet  # noqa: PLC0415
+
+    torch.manual_seed(7)
+
+    class _Enc(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = nn.Linear(3, 5)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.lin(x.to(torch.float32).mean(dim=(1, 2, 3)))
+
+    return ProtoNet(_Enc(), encoder_batch_size=3)
+
+
+def test_streaming_step_matches_classic_step() -> None:
+    '''Streaming grad-accum must match a full-batch backward step: same loss,
+    same accuracy, same post-step parameters (CPU / fp32).'''
+    from src.training.meta_trainer import _train_step_streaming  # noqa: PLC0415
+
+    tensors = _mini_episode()
+    device = torch.device('cpu')
+
+    model_stream = _build_protonet()
+    opt_stream = torch.optim.SGD(model_stream.parameters(), lr=0.1)
+    loss_s, acc_s = _train_step_streaming(
+        model_stream, tensors, n_way=2, optimizer=opt_stream,
+        scaler=None, use_amp=False, device=device,
+    )
+
+    model_classic = _build_protonet()
+    opt_classic = torch.optim.SGD(model_classic.parameters(), lr=0.1)
+    opt_classic.zero_grad(set_to_none=True)
+    out = model_classic(
+        tensors['support'], tensors['query'],
+        tensors['support_labels'], tensors['query_labels'], n_way=2,
+    )
+    out['loss'].backward()
+    opt_classic.step()
+
+    assert loss_s == pytest.approx(float(out['loss'].detach()), rel=1e-5, abs=1e-6)
+    assert acc_s == pytest.approx(out['accuracy'], abs=1e-6)
+    for (name, p_s), (_, p_c) in zip(
+        model_stream.named_parameters(), model_classic.named_parameters()
+    ):
+        assert torch.allclose(p_s, p_c, atol=1e-6), f'param {name} diverged'

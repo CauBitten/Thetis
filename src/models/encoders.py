@@ -36,16 +36,27 @@ def preprocess_video_batch(x: torch.Tensor) -> torch.Tensor:
     '''
     if x.ndim != 5 or x.shape[-1] != 3:
         raise ValueError(f'expected (B, T, H, W, 3) tensor, got shape {tuple(x.shape)}')
-    if x.dtype == torch.uint8:
-        y = x.to(torch.float32) / 255.0
-    else:
-        y = x.to(torch.float32)
-        if y.numel() > 0 and float(y.max()) > 1.5:  # assume 0-255 range
-            y = y / 255.0
-    y = y.permute(0, 4, 1, 2, 3).contiguous()  # (B, 3, T, H, W)
+    # Target dtype honours an enclosing autocast: under AMP the clip enters the
+    # backbone in fp16 (half the bytes) instead of a full fp32 copy the conv
+    # would immediately re-cast anyway. Falls back to fp32 (no autocast / CPU).
+    out_dtype = torch.float32
+    if x.is_cuda and torch.is_autocast_enabled():
+        out_dtype = (
+            torch.get_autocast_dtype('cuda')
+            if hasattr(torch, 'get_autocast_dtype')
+            else torch.get_autocast_gpu_dtype()
+        )
+    # uint8 always scales by 255; float is assumed in [0, 1] unless it looks like
+    # 0-255 (short-circuits so the uint8 path never pays the max() device sync).
+    divide = x.dtype == torch.uint8 or (x.numel() > 0 and float(x.max()) > 1.5)
+    # Single cast+copy straight into channel-first contiguous layout (B, 3, T, H, W),
+    # then normalise in place — no extra full-size temporaries.
+    y = x.permute(0, 4, 1, 2, 3).to(out_dtype, memory_format=torch.contiguous_format)
+    if divide:
+        y = y.div_(255.0)
     mean = torch.tensor(KINETICS_MEAN, device=y.device, dtype=y.dtype).view(1, 3, 1, 1, 1)
     std = torch.tensor(KINETICS_STD, device=y.device, dtype=y.dtype).view(1, 3, 1, 1, 1)
-    return (y - mean) / std
+    return y.sub_(mean).div_(std)
 
 
 class VideoEncoder(nn.Module):

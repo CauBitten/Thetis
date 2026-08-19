@@ -47,6 +47,50 @@ class ProtoNet(nn.Module):
         self.encoder = encoder
         self.encoder_batch_size = encoder_batch_size
 
+    def _encode(self, videos: torch.Tensor, encoder_batch_size: int | None = None) -> torch.Tensor:
+        '''Encode ``(B, T, H, W, 3)`` → ``(B, D)``, optionally in chunks.
+
+        Chunking caps the *transient* forward footprint, but under autograd each
+        chunk's activation graph is retained until backward — so this only bounds
+        peak memory in ``no_grad`` (eval). The training loop streams support/query
+        with gradient accumulation instead (see
+        ``meta_trainer._train_step_streaming``).
+        '''
+        batch_size = encoder_batch_size if encoder_batch_size is not None else self.encoder_batch_size
+        if batch_size is None or batch_size >= videos.shape[0]:
+            return self.encoder(videos)
+        chunks: list[torch.Tensor] = []
+        for start in range(0, videos.shape[0], batch_size):
+            chunks.append(self.encoder(videos[start : start + batch_size]))
+        return torch.cat(chunks, dim=0)
+
+    @staticmethod
+    def _prototypes(support_emb: torch.Tensor, support_labels: torch.Tensor, n_way: int) -> torch.Tensor:
+        '''Per-class mean of the support embeddings → ``(n_way, D)``.'''
+        embed_dim = support_emb.shape[1]
+        prototypes = torch.zeros(n_way, embed_dim, device=support_emb.device, dtype=support_emb.dtype)
+        for c in range(n_way):
+            mask = support_labels == c
+            if not bool(mask.any()):
+                raise ValueError(f'class {c} has no support samples in this episode')
+            prototypes[c] = support_emb[mask].mean(dim=0)
+        return prototypes
+
+    @staticmethod
+    def _logits(query_emb: torch.Tensor, prototypes: torch.Tensor) -> torch.Tensor:
+        '''Negative squared L2 distance ``(N*Q, N)``, forced to fp32.
+
+        Under AMP the embeddings are fp16 and a sum of ``D`` squared differences
+        can exceed fp16's 65504 ceiling → ``inf`` → ``NaN`` loss. Computing the
+        distance with autocast disabled keeps the logits/softmax numerically safe
+        at negligible (few-KB) memory cost.
+        '''
+        with torch.autocast(device_type=query_emb.device.type, enabled=False):
+            q = query_emb.float().unsqueeze(1)   # (N*Q, 1, D)
+            p = prototypes.float().unsqueeze(0)  # (1, N, D)
+            diffs = q - p
+            return -(diffs * diffs).sum(dim=-1)  # (N*Q, N)
+
     def forward(
         self,
         support: torch.Tensor,
@@ -68,34 +112,15 @@ class ProtoNet(nn.Module):
             raise ValueError(f'query_labels shape {tuple(query_labels.shape)} != ({n_query},)')
 
         combined = torch.cat([support, query], dim=0)
-        batch_size = encoder_batch_size if encoder_batch_size is not None else self.encoder_batch_size
-        if batch_size is None or batch_size >= combined.shape[0]:
-            embeddings = self.encoder(combined)
-        else:
-            # Chunked encode keeps activations bounded — critical on CPU / small GPUs
-            # where R(2+1)D-18 with batch=100 explodes RAM.
-            chunks: list[torch.Tensor] = []
-            for start in range(0, combined.shape[0], batch_size):
-                chunks.append(self.encoder(combined[start : start + batch_size]))
-            embeddings = torch.cat(chunks, dim=0)
+        embeddings = self._encode(combined, encoder_batch_size)
         if embeddings.ndim != 2:
             raise ValueError(f'encoder must return (B, D); got shape {tuple(embeddings.shape)}')
 
         support_emb = embeddings[:n_support]
         query_emb = embeddings[n_support:]
 
-        embed_dim = support_emb.shape[1]
-        prototypes = torch.zeros(n_way, embed_dim, device=support_emb.device, dtype=support_emb.dtype)
-        for c in range(n_way):
-            mask = support_labels == c
-            count = int(mask.sum().item())
-            if count == 0:
-                raise ValueError(f'class {c} has no support samples in this episode')
-            prototypes[c] = support_emb[mask].mean(dim=0)
-
-        # Negative squared L2 distance: (N*Q, N)
-        diffs = query_emb.unsqueeze(1) - prototypes.unsqueeze(0)
-        logits = -(diffs * diffs).sum(dim=-1)
+        prototypes = self._prototypes(support_emb, support_labels, n_way)
+        logits = self._logits(query_emb, prototypes)
         loss = F.cross_entropy(logits, query_labels)
         preds = logits.argmax(dim=-1)
         accuracy = float((preds == query_labels).float().mean().item())

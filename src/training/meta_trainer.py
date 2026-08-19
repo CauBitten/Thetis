@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import optim
+from torch.nn import functional as F
 import yaml
 
 if __package__ in (None, ''):
@@ -93,7 +94,7 @@ def select_device(requested: str | None) -> torch.device:
     return torch.device(requested)
 
 
-def configure_cuda_memory(device: torch.device) -> float | None:
+def configure_cuda_memory(device: torch.device, fraction: float = 0.92) -> float | None:
     '''Pre-flight CUDA tuning: empty cache, cap memory fraction, request expandable segments.
 
     On Windows, CUDA happily spills into system RAM (shared GPU memory) when
@@ -112,9 +113,9 @@ def configure_cuda_memory(device: torch.device) -> float | None:
         pass
     try:
         total_gb = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
-        # 0.92 of dedicated VRAM keeps a little headroom for cuDNN workspaces
-        # and prevents bleeding into Windows shared memory.
-        torch.cuda.set_per_process_memory_fraction(0.92, device.index or 0)
+        # Cap the per-process fraction so OOM fails fast at the real VRAM limit
+        # (keeps headroom for cuDNN workspaces / avoids Windows shared-memory spill).
+        torch.cuda.set_per_process_memory_fraction(float(fraction), device.index or 0)
         return total_gb
     except Exception:  # noqa: BLE001
         return None
@@ -298,6 +299,92 @@ def _run_eval(
     return mean, ci, mean_loss
 
 
+def _mem_profile_enabled() -> bool:
+    '''Opt-in CUDA memory profiling, toggled by ``THETIS_MEM_PROFILE=1``.'''
+    import os  # noqa: PLC0415
+
+    return os.environ.get('THETIS_MEM_PROFILE', '') not in ('', '0', 'false', 'False')
+
+
+def _log_cuda_mem(tag: str, device: torch.device) -> None:
+    '''Print alloc/reserved/peak MiB for ``device`` (no-op off CUDA).'''
+    if device.type != 'cuda':
+        return
+    mib = 1024 * 1024
+    alloc = torch.cuda.memory_allocated() / mib
+    reserved = torch.cuda.memory_reserved() / mib
+    peak = torch.cuda.max_memory_allocated() / mib
+    print(f'[mem] {tag}: alloc={alloc:.0f}MiB reserved={reserved:.0f}MiB peak={peak:.0f}MiB', flush=True)
+
+
+def _train_step_streaming(
+    model: ProtoNet,
+    tensors: dict[str, torch.Tensor],
+    n_way: int,
+    optimizer: optim.Optimizer,
+    scaler: Any,
+    use_amp: bool,
+    device: torch.device,
+    profile: bool = False,
+) -> tuple[float, float]:
+    '''One training step with the query set streamed in micro-batches.
+
+    Encodes the (small) support set once to build prototypes, then walks the query
+    set ``encoder_batch_size`` clips at a time, calling ``backward`` per micro-batch
+    with ``retain_graph`` so the shared support graph survives until the last one.
+    Peak activation memory is ~``support + one micro-batch`` instead of the whole
+    episode, yet the accumulated gradient is mathematically identical to a single
+    full-batch ``backward`` (each micro-batch contributes ``sum(ce) / n_query``, so
+    the accumulated ``.grad`` equals the mean-CE gradient). Returns
+    ``(episode_loss, episode_accuracy)`` matching ``ProtoNet.forward`` semantics.
+    '''
+    optimizer.zero_grad(set_to_none=True)
+    support = tensors['support']
+    query = tensors['query']
+    support_labels = tensors['support_labels']
+    query_labels = tensors['query_labels']
+    amp_ctx = (
+        torch.amp.autocast(device_type='cuda', dtype=torch.float16)
+        if use_amp
+        else _nullcontext()
+    )
+
+    with amp_ctx:
+        support_emb = model.encoder(support)
+        prototypes = model._prototypes(support_emb, support_labels, n_way)
+    if profile:
+        _log_cuda_mem('after-support', device)
+
+    n_query = int(query.shape[0])
+    micro = model.encoder_batch_size or n_query
+    total_loss = 0.0
+    correct = 0
+    for start in range(0, n_query, micro):
+        end = min(start + micro, n_query)
+        retain = end < n_query
+        labels_mb = query_labels[start:end]
+        with amp_ctx:
+            query_emb = model.encoder(query[start:end])
+            logits = model._logits(query_emb, prototypes)
+            # reduction='sum' / n_query reproduces the full-episode mean CE exactly.
+            loss_mb = F.cross_entropy(logits, labels_mb, reduction='sum') / n_query
+        if scaler is not None:
+            scaler.scale(loss_mb).backward(retain_graph=retain)
+        else:
+            loss_mb.backward(retain_graph=retain)
+        total_loss += float(loss_mb.detach())
+        correct += int((logits.detach().argmax(dim=-1) == labels_mb).sum().item())
+
+    if profile:
+        _log_cuda_mem('after-query-loop', device)
+    if scaler is not None:
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
+    return total_loss, correct / n_query
+
+
 def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> dict[str, Any]:
     '''Execute the meta-training loop described by ``cfg``.
 
@@ -307,7 +394,7 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
     seed = int(cfg['seed'])
     set_global_seed(seed)
     device = select_device(device_arg)
-    configure_cuda_memory(device)
+    configure_cuda_memory(device, float(cfg.get('optim', {}).get('cuda_memory_fraction', 0.92)))
 
     modality = cfg['modalities'][0]
     data_cfg = cfg['data']
@@ -434,6 +521,11 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
     # Mixed precision: fp16 autocast on CUDA cuts activations roughly in half
     # and is the easiest knob to keep R(2+1)D-18 fitting in 4 GB GPUs.
     use_amp = bool(cfg.get('optim', {}).get('fp16', device.type == 'cuda')) and device.type == 'cuda'
+    # Query streaming (grad accumulation) bounds training activation memory to
+    # ~support + one micro-batch, the real fix for R(2+1)D-18 OOMs. Default on for
+    # CUDA; classic full-batch backward otherwise (e.g. CPU smoke). Override via
+    # optim.stream_query.
+    stream_query = bool(cfg.get('optim', {}).get('stream_query', device.type == 'cuda'))
 
     optim_cfg = cfg['optim']
     optimizer = optim.Adam(
@@ -455,7 +547,7 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
     print(
         f'[setup] device={device}{vram_str} encoder={encoder_cfg.get("name", "r2plus1d_18")} '
         f'pretrained={pretrained} encoder_batch_size={encoder_batch_size} fp16={use_amp} '
-        f'grad_checkpoint={use_checkpointing} '
+        f'grad_checkpoint={use_checkpointing} stream_query={stream_query} '
         f'n_way_train={n_way_train} n_way_val={n_way_val} k_shot={k_shot} q_query={q_query} '
         f'episodes_per_epoch={episodes_per_epoch} epochs={epochs} smoke={smoke}',
         flush=True,
@@ -493,6 +585,7 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
     # Verbose prints in smoke mode (every episode); compact otherwise (every ~10%).
     progress_every = 1 if smoke else max(1, episodes_per_epoch // 10)
 
+    mem_profile = _mem_profile_enabled()
     best_val = float('-inf')
     for epoch in range(1, epochs + 1):
         model.train()
@@ -502,9 +595,29 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
             ep_idx = (epoch - 1) * episodes_per_epoch + i
             ep = train_sampler.sample_episode('meta_train', ep_idx)
             tensors = assemble_episode_tensors(train_loader, ep, device)
-            optimizer.zero_grad(set_to_none=True)
-            if use_amp:
-                with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+            profile = mem_profile and epoch == 1 and i < 3
+            if profile and device.type == 'cuda':
+                torch.cuda.reset_peak_memory_stats()
+                _log_cuda_mem('episode-start', device)
+            if stream_query:
+                step_loss, step_acc = _train_step_streaming(
+                    model, tensors, n_way_train, optimizer, scaler, use_amp, device, profile=profile
+                )
+            else:
+                optimizer.zero_grad(set_to_none=True)
+                if use_amp:
+                    with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+                        out = model(
+                            tensors['support'],
+                            tensors['query'],
+                            tensors['support_labels'],
+                            tensors['query_labels'],
+                            n_way=n_way_train,
+                        )
+                    scaler.scale(out['loss']).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
                     out = model(
                         tensors['support'],
                         tensors['query'],
@@ -512,21 +625,16 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
                         tensors['query_labels'],
                         n_way=n_way_train,
                     )
-                scaler.scale(out['loss']).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                out = model(
-                    tensors['support'],
-                    tensors['query'],
-                    tensors['support_labels'],
-                    tensors['query_labels'],
-                    n_way=n_way_train,
-                )
-                out['loss'].backward()
-                optimizer.step()
-            epoch_losses.append(float(out['loss'].detach().cpu().item()))
-            epoch_accs.append(out['accuracy'])
+                    out['loss'].backward()
+                    optimizer.step()
+                step_loss = float(out['loss'].detach().cpu().item())
+                step_acc = out['accuracy']
+                del out
+            if profile:
+                _log_cuda_mem('episode-end', device)
+            epoch_losses.append(step_loss)
+            epoch_accs.append(step_acc)
+            del tensors
             if (i + 1) % progress_every == 0 or (i + 1) == episodes_per_epoch:
                 running_loss = float(np.mean(epoch_losses))
                 running_acc = float(np.mean(epoch_accs))

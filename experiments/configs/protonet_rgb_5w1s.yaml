@@ -7,6 +7,10 @@ modalities:
 encoder:
   name: r2plus1d_18
   pretrained: true
+  # Re-compute encoder activations during backward (~70% less activation VRAM,
+  # ~25-30% slower/step). Combined with optim.stream_query below this keeps
+  # R(2+1)D-18 well within a ~15 GB GPU. Comment out if streaming alone fits.
+  gradient_checkpointing: true
 
 episode:
   n_way: 5
@@ -23,6 +27,8 @@ optim:
   learning_rate: 0.0001
   weight_decay: 0.0
   eval_every: 5
+  fp16: true            # AMP autocast (CUDA only) — halves activation memory
+  stream_query: true    # stream query in micro-batches w/ grad accumulation
 
 data:
   manifest_path: data/processed/manifest.csv
