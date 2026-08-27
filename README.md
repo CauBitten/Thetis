@@ -101,7 +101,9 @@ Thetis/
 ├── notebooks/
 │   ├── 01_eda.ipynb            # Análise exploratória do THETIS
 │   ├── 02_episode_design.ipynb # Construção dos splits episódicos
-│   └── 03_results.ipynb        # Análise comparativa entre métodos
+│   ├── 03_results.ipynb        # Análise comparativa entre métodos
+│   ├── colab_train_protonet.ipynb   # Meta-treino no Google Colab (RGB 5w5s)
+│   └── kaggle_train_protonet.ipynb  # Meta-treino no Kaggle (RGB 5w1s, com --resume)
 │
 ├── experiments/
 │   ├── configs/                # Um .yaml por experimento (método × modalidade × N × K)
@@ -245,10 +247,41 @@ uv run python src/training/meta_trainer.py \
     --smoke
 ```
 
-Cada run grava:
+Cada run grava, **a cada época**:
 
-- `outputs/checkpoints/<run_id>/{best,last}.pt`
-- `experiments/logs/<run_id>/training.json` (curvas de loss/acc + config + splits)
+- `outputs/checkpoints/<run_id>/last.pt` (modelo + optimizer + histórico) e `best.pt` (melhor val_acc)
+- `experiments/logs/<run_id>/training.json` (curvas de loss/acc, segundos por época, config + splits)
+
+### Retomar um treino interrompido
+
+`--resume` continua da época seguinte à do `last.pt` — o alvo é `optim.epochs`
+da config, então dá para treinar em blocos (40 → 80 → 100 épocas) aumentando
+esse número entre as sessões:
+
+```bash
+# retoma de outputs/checkpoints/<run_id>/last.pt (começa do zero se não houver)
+uv run python src/training/meta_trainer.py \
+    --config experiments/configs/protonet_rgb_5w1s.yaml --resume
+
+# ou de um checkpoint específico
+uv run python src/training/meta_trainer.py \
+    --config experiments/configs/protonet_rgb_5w1s.yaml \
+    --resume outputs/checkpoints/<run_id>/last.pt
+```
+
+Os episódios são endereçados por índice e o sampler é determinístico por índice,
+então a run retomada vê a mesma sequência de episódios de uma run contínua (só o
+RNG de augmentation reinicia).
+
+### Treinar no Colab ou no Kaggle
+
+Quem não tem GPU local roda pelos notebooks em `notebooks/`, que clonam este
+repositório, montam a config derivada e treinam:
+
+- `colab_train_protonet.ipynb` — Colab, dados vindos do Google Drive.
+- `kaggle_train_protonet.ipynb` — Kaggle, dados como *Dataset* anexado. O
+  manifesto é regenerado a partir da árvore `VIDEO_RGB` e o treino usa
+  `--resume`, porque uma sessão do Kaggle (~12 h) não cobre as 100 épocas.
 
 ### Avaliação episódica
 

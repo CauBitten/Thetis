@@ -399,3 +399,109 @@ def test_streaming_step_matches_classic_step() -> None:
         model_stream.named_parameters(), model_classic.named_parameters()
     ):
         assert torch.allclose(p_s, p_c, atol=1e-6), f'param {name} diverged'
+
+
+# ---------------------------------------------------------------------------
+# --resume: continue an interrupted run from last.pt
+# ---------------------------------------------------------------------------
+
+
+def _resume_cfg(tmp_path: Path, manifest_path: Path, epochs: int) -> dict[str, Any]:
+    return {
+        'method': 'protonet',
+        'modalities': ['rgb'],
+        'encoder': {'name': 'r2plus1d_18', 'pretrained': False, 'batch_size': 2},
+        'episode': {
+            'n_way': 2,
+            'n_way_val': 2,
+            'k_shot': 1,
+            'q_query': 2,
+            'episodes_per_epoch': 1,
+            'episodes_meta_val': 1,
+        },
+        'optim': {
+            'epochs': epochs,
+            'learning_rate': 1e-3,
+            'eval_every': 1,
+            'fp16': False,
+            'stream_query': False,
+        },
+        'data': {
+            'manifest_path': str(manifest_path),
+            'dataset_root': str(tmp_path),
+            'train_classes': 2,
+            'val_classes': 2,
+            'test_classes': 2,
+            'frame_count': 4,
+            'resize_size': 24,
+            'spatial_size': 16,
+        },
+        'seed': 42,
+        'output_root': str(tmp_path / 'outputs'),
+        'log_root': str(tmp_path / 'logs'),
+        'run_id': 'unittest_resume',
+    }
+
+
+def test_run_training_resume_continues_from_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    '''A run stopped at epoch N picks back up at N+1 and keeps its history.'''
+    import pandas as pd  # noqa: PLC0415
+
+    manifest_path = _make_synthetic_manifest(tmp_path)
+    df_full = pd.read_csv(
+        manifest_path, dtype={'actor': str, 'action_code': str}, keep_default_na=False
+    )
+    monkeypatch.setattr(
+        'src.training.meta_trainer.ThetisDataset',
+        lambda *a, **kw: _SyntheticDataset(df_full, modality='rgb'),
+    )
+    monkeypatch.setattr('src.training.meta_trainer.VideoEncoder', lambda **_kw: _ToyEncoder())
+
+    ckpt_dir = tmp_path / 'outputs' / 'checkpoints' / 'unittest_resume'
+
+    # --resume with nothing to resume from: starts at epoch 1 anyway.
+    first = run_training(_resume_cfg(tmp_path, manifest_path, epochs=2), False, 'cpu', resume='auto')
+    assert [e['epoch'] for e in first['epochs']] == [1, 2]
+    assert 'resumed_from' not in first
+    # last.pt + the JSON log are written every epoch, not only at the end.
+    assert (ckpt_dir / 'last.pt').exists()
+    assert torch.load(ckpt_dir / 'last.pt', map_location='cpu', weights_only=False)['epoch'] == 2
+
+    # Raising the epoch target and resuming continues at 3 with history intact.
+    second = run_training(_resume_cfg(tmp_path, manifest_path, epochs=4), False, 'cpu', resume='auto')
+    assert [e['epoch'] for e in second['epochs']] == [1, 2, 3, 4]
+    assert second['resumed_from']['at_epoch'] == 3
+    assert second['started_at'] == first['started_at']
+    logged = json.loads((tmp_path / 'logs' / 'unittest_resume' / 'training.json').read_text())
+    assert [e['epoch'] for e in logged['epochs']] == [1, 2, 3, 4]
+
+    # Target already met: no further epochs, log preserved.
+    third = run_training(_resume_cfg(tmp_path, manifest_path, epochs=4), False, 'cpu', resume='auto')
+    assert [e['epoch'] for e in third['epochs']] == [1, 2, 3, 4]
+
+
+def test_run_training_resume_missing_explicit_checkpoint_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    '''An explicit --resume path that does not exist is an error, not a silent restart.'''
+    import pandas as pd  # noqa: PLC0415
+
+    manifest_path = _make_synthetic_manifest(tmp_path)
+    df_full = pd.read_csv(
+        manifest_path, dtype={'actor': str, 'action_code': str}, keep_default_na=False
+    )
+    monkeypatch.setattr(
+        'src.training.meta_trainer.ThetisDataset',
+        lambda *a, **kw: _SyntheticDataset(df_full, modality='rgb'),
+    )
+    monkeypatch.setattr('src.training.meta_trainer.VideoEncoder', lambda **_kw: _ToyEncoder())
+
+    with pytest.raises(FileNotFoundError):
+        run_training(
+            _resume_cfg(tmp_path, manifest_path, epochs=1),
+            False,
+            'cpu',
+            resume=str(tmp_path / 'nope.pt'),
+        )

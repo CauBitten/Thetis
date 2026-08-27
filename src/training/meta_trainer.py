@@ -10,6 +10,9 @@ loop with periodic eval on ``meta_val``. Checkpoints land in
 
 Smoke mode (``--smoke``) shrinks epochs/episodes to ~seconds for CI; it also
 forces ``pretrained=False`` on the encoder so no network download is required.
+
+``last.pt`` and the JSON log are rewritten every epoch, so a run killed by a
+hosted-runtime time cap (Kaggle/Colab) can be continued with ``--resume``.
 '''
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import argparse
 import datetime as _dt
 import json
 import sys
+import time
 from collections.abc import Sequence
 from contextlib import nullcontext as _nullcontext
 from pathlib import Path
@@ -385,8 +389,20 @@ def _train_step_streaming(
     return total_loss, correct / n_query
 
 
-def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> dict[str, Any]:
+def run_training(
+    cfg: dict[str, Any],
+    smoke: bool,
+    device_arg: str | None,
+    resume: bool | str | Path | None = None,
+) -> dict[str, Any]:
     '''Execute the meta-training loop described by ``cfg``.
+
+    ``resume`` continues an interrupted run: ``'auto'`` (or ``True``) picks up
+    ``<ckpt_dir>/last.pt``, starting from scratch when there is none; anything
+    else is treated as an explicit checkpoint path. Episodes are addressed by
+    index (``(epoch - 1) * episodes_per_epoch + i``) and the sampler is
+    deterministic per index, so a resumed run replays the same episode stream
+    as an uninterrupted one — only the augmentation RNG restarts.
 
     Returns the in-memory training log so tests can assert on it without
     re-reading from disk.
@@ -587,7 +603,46 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
 
     mem_profile = _mem_profile_enabled()
     best_val = float('-inf')
-    for epoch in range(1, epochs + 1):
+
+    # Resume support: hosted runtimes (Kaggle/Colab) cap a session well below a
+    # full 100-epoch run, so pick the run back up from the epoch after last.pt.
+    start_epoch = 1
+    if resume:
+        auto = resume is True or str(resume) == 'auto'
+        resume_path = ckpt_dir / 'last.pt' if auto else Path(resume)
+        if not resume_path.is_file():
+            if not auto:
+                raise FileNotFoundError(f'resume checkpoint not found: {resume_path}')
+            print(f'[resume] no checkpoint at {resume_path} — starting from epoch 1', flush=True)
+        else:
+            state = torch.load(resume_path, map_location=device, weights_only=False)
+            model.load_state_dict(state['model_state'])
+            optimizer.load_state_dict(state['optimizer_state'])
+            if scaler is not None and state.get('scaler_state') is not None:
+                scaler.load_state_dict(state['scaler_state'])
+            start_epoch = int(state['epoch']) + 1
+            prior = state.get('log') or {}
+            log['epochs'] = list(prior.get('epochs', []))
+            log['best_val_acc'] = prior.get('best_val_acc')
+            log['best_epoch'] = prior.get('best_epoch')
+            log['started_at'] = prior.get('started_at', log['started_at'])
+            log['resumed_from'] = {'checkpoint': str(resume_path), 'at_epoch': start_epoch}
+            if log['best_val_acc'] is not None:
+                best_val = float(log['best_val_acc'])
+            if start_epoch > epochs:
+                print(
+                    f'[resume] {resume_path} already covers all {epochs} epochs — nothing to do',
+                    flush=True,
+                )
+            else:
+                print(
+                    f'[resume] {resume_path} -> continuing at epoch {start_epoch}/{epochs} '
+                    f'(best_val={log["best_val_acc"]} @ep{log["best_epoch"]})',
+                    flush=True,
+                )
+
+    for epoch in range(start_epoch, epochs + 1):
+        epoch_t0 = time.perf_counter()
         model.train()
         epoch_losses: list[float] = []
         epoch_accs: list[float] = []
@@ -687,21 +742,34 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
             )
         if best_val > float('-inf'):
             summary += f' | best_val={best_val:.4f} @ep{log["best_epoch"]}'
+        # Wall time per epoch: the number you need to budget epochs against a
+        # hosted-runtime session cap (Kaggle/Colab).
+        epoch_record['seconds'] = round(time.perf_counter() - epoch_t0, 1)
+        summary += f' | {epoch_record["seconds"]:.0f}s'
         print(summary)
         log['epochs'].append(epoch_record)
 
-    torch.save(
-        {
-            'epoch': epochs,
-            'model_state': model.state_dict(),
-            'optimizer_state': optimizer.state_dict(),
-            'config': cfg,
-        },
-        ckpt_dir / 'last.pt',
-    )
+        # Rewrite last.pt + the JSON log every epoch (via a temp file, so a kill
+        # mid-write can't corrupt them) — that is what makes --resume possible
+        # after a session time cap.
+        _atomic_torch_save(
+            {
+                'epoch': epoch,
+                'model_state': model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'scaler_state': scaler.state_dict() if scaler is not None else None,
+                'config': cfg,
+                'log': log,
+            },
+            ckpt_dir / 'last.pt',
+        )
+        _atomic_write_text(
+            log_dir / 'training.json', json.dumps(log, indent=2, default=_json_default)
+        )
+
     log['finished_at'] = _timestamp()
 
-    (log_dir / 'training.json').write_text(json.dumps(log, indent=2, default=_json_default))
+    _atomic_write_text(log_dir / 'training.json', json.dumps(log, indent=2, default=_json_default))
     print(f'wrote training log to {log_dir / "training.json"}')
     print(f'checkpoints in {ckpt_dir}')
     return log
@@ -709,6 +777,19 @@ def run_training(cfg: dict[str, Any], smoke: bool, device_arg: str | None) -> di
 
 def _timestamp() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+
+
+def _atomic_torch_save(payload: dict[str, Any], path: Path) -> None:
+    '''``torch.save`` to ``path`` via a sibling temp file, then rename.'''
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    torch.save(payload, tmp)
+    tmp.replace(path)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    tmp.write_text(text)
+    tmp.replace(path)
 
 
 def _default_encoder_batch_size(device: torch.device, smoke: bool) -> int:
@@ -758,6 +839,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Smoke mode: 1 epoch, 2 episodes/epoch, random-init encoder. Verifies the pipeline end-to-end.',
     )
+    parser.add_argument(
+        '--resume',
+        nargs='?',
+        const='auto',
+        default=None,
+        metavar='CHECKPOINT',
+        help='Continue an interrupted run. Bare --resume reads '
+        '<output_root>/checkpoints/<run_id>/last.pt (no-op if absent); '
+        'pass a path to resume from a specific checkpoint.',
+    )
     return parser
 
 
@@ -765,7 +856,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
-    run_training(cfg, smoke=args.smoke, device_arg=args.device)
+    run_training(cfg, smoke=args.smoke, device_arg=args.device, resume=args.resume)
     return 0
 
 

@@ -7,6 +7,7 @@ modalities:
 encoder:
   name: r2plus1d_18
   pretrained: true
+  batch_size: 8
   # Re-compute encoder activations during backward (~70% less activation VRAM,
   # ~25-30% slower/step). Combined with optim.stream_query below this keeps
   # R(2+1)D-18 well within a ~15 GB GPU. Comment out if streaming alone fits.

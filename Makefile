@@ -19,7 +19,7 @@ N_TRAIN ?= 6
 N_VAL ?= 3
 N_TEST ?= 3
 
-TRAIN_CONFIG ?= experiments/configs/protonet_rgb_5w5s.yaml
+TRAIN_CONFIG ?= experiments/configs/protonet_rgb_5w1s.yaml
 CHECKPOINT ?= outputs/checkpoints/latest/best.pt
 TEST_PATH ?= tests/
 
