@@ -21,7 +21,7 @@ import datetime as _dt
 import hashlib
 import json
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +86,10 @@ class EpisodeSampler:
         modality:      optional modality filter; when set, candidates are
                        restricted to manifest rows where the corresponding
                        ``path_<modality>`` column is non-empty.
+        exclude:       sample_ids to drop from the candidate pool — typically
+                       ``data/processed/excluded_clips.json`` for this modality
+                       (blank clips and byte-identical duplicates). Applied
+                       after the modality filter.
         strict:        if True, raise when a class can't supply enough samples
                        for an episode; else skip the class and resample.
     '''
@@ -100,6 +104,7 @@ class EpisodeSampler:
         seed: int,
         speed_split: str = 'none',
         modality: str | None = None,
+        exclude: Iterable[str] | None = None,
         strict: bool = False,
     ) -> None:
         if speed_split not in SPEED_MODES:
@@ -121,6 +126,7 @@ class EpisodeSampler:
         self.seed = int(seed)
         self.speed_split = speed_split
         self.modality = modality
+        self.exclude = frozenset(exclude or ())
         self.strict = bool(strict)
 
         df = pd.read_csv(
@@ -135,6 +141,8 @@ class EpisodeSampler:
                 raise ValueError(f'unknown modality: {modality}')
             column = PATH_COLUMNS[modality]
             df = df[df[column].astype(str) != ''].reset_index(drop=True)
+        if self.exclude:
+            df = df[~df['sample_id'].isin(self.exclude)].reset_index(drop=True)
         self.df = df
         self._by_class: dict[str, pd.DataFrame] = {
             c: df[df['action_label'] == c].reset_index(drop=True) for c in df['action_label'].unique()

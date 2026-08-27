@@ -54,6 +54,7 @@ from src.data.loader import (  # noqa: E402
     PATH_COLUMNS,
     ThetisDataset,
 )
+from src.data.loader import load_exclusions  # noqa: E402
 from src.models.encoders import VideoEncoder  # noqa: E402
 from src.models.protonet import ProtoNet  # noqa: E402
 from src.utils.metrics import accuracy_with_ci  # noqa: E402
@@ -247,6 +248,7 @@ def _make_sampler(
     k_shot: int,
     q_query: int,
     modality: str,
+    exclude: frozenset[str] | None = None,
 ) -> EpisodeSampler:
     return EpisodeSampler(
         manifest_path=manifest_path,
@@ -257,6 +259,7 @@ def _make_sampler(
         seed=seed,
         speed_split='none',
         modality=modality,
+        exclude=exclude,
         strict=False,
     )
 
@@ -461,12 +464,22 @@ def run_training(
         episodes_meta_val = int(ep_cfg.get('episodes_meta_val', 100))
         epochs = int(cfg['optim'].get('epochs', 100))
 
+    # Blank clips and byte-identical duplicates shipped by THETIS — the latter can
+    # otherwise put the same footage in an episode's support and query set. Built
+    # by `make preprocess --full-integrity`; absent file = no filter.
+    exclude_defective = bool(data_cfg.get('exclude_defective', True))
+    excluded = load_exclusions(manifest_path, modality, enabled=exclude_defective)
+    if excluded:
+        print(f'[setup] excluding {len(excluded)} defective {modality} clips', flush=True)
+    elif exclude_defective:
+        print(f'[setup] no exclusions found for {modality} (run preprocess --full-integrity)', flush=True)
+
     train_sampler = _make_sampler(
-        manifest_path, splits, seed, n_way_train, k_shot, q_query, modality
+        manifest_path, splits, seed, n_way_train, k_shot, q_query, modality, excluded
     )
     val_eligible = len(splits['meta_val']) >= n_way_val
     val_sampler = (
-        _make_sampler(manifest_path, splits, seed + 1, n_way_val, k_shot, q_query, modality)
+        _make_sampler(manifest_path, splits, seed + 1, n_way_val, k_shot, q_query, modality, excluded)
         if val_eligible
         else None
     )

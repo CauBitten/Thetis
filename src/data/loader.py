@@ -195,7 +195,18 @@ def collect_records_wide(dataset_root: Path) -> tuple[pd.DataFrame, dict[str, An
     One row per ``(actor, action_label, sequence_idx)`` with one ``path_<modality>``
     column per modality. Missing modalities are stored as ``''`` (empty string),
     not NaN. Diagnostics include parse failures, action-token mismatches,
-    orphan files (regex non-match) and missing modality directories.
+    orphan files (regex non-match), missing modality directories and key
+    collisions.
+
+    A *key collision* is two files of the same modality parsing to the same
+    ``(actor, action, sequence)``. The last one wins, so the other is dropped
+    from the manifest entirely — and because the survivor may be a different
+    take than the sibling modalities at that key, the row's cross-modality
+    pairing can be wrong. THETIS ships one such case: ``VIDEO_Skelet2D`` has
+    ``p19_bvolley_skelet2D_s3 (1).avi`` (really sequence 3) and ``(2).avi``
+    (really sequence 2), whose ``' (N)'`` suffixes are stripped by
+    :func:`parse_actor_and_sequence`. Recording collisions here keeps that
+    class of defect out of silence — see ``experiments/configs/README.md``.
     '''
     records: dict[tuple[str, str, int], dict[str, Any]] = defaultdict(dict)
     parse_failures: list[dict[str, str]] = []
@@ -203,6 +214,7 @@ def collect_records_wide(dataset_root: Path) -> tuple[pd.DataFrame, dict[str, An
     orphans: list[dict[str, str]] = []
     missing_modality_dirs: list[str] = []
     unknown_class_dirs: list[dict[str, str]] = []
+    key_collisions: list[dict[str, Any]] = []
 
     for modality_dir_name, modality in MODALITY_DIRS.items():
         modality_root = dataset_root / modality_dir_name
@@ -240,6 +252,20 @@ def collect_records_wide(dataset_root: Path) -> tuple[pd.DataFrame, dict[str, An
                     )
 
                 key = (actor_id, folder_class, seq_idx)
+                # Last write wins (below), so a collision silently drops a clip
+                # and can mis-pair the row across modalities. Record it instead.
+                previous = records[key].get(modality)
+                if previous is not None:
+                    key_collisions.append(
+                        {
+                            'modality': modality,
+                            'actor': actor_id,
+                            'action_label': folder_class,
+                            'sequence_idx': seq_idx,
+                            'dropped': previous,
+                            'kept': relpath,
+                        }
+                    )
                 records[key][modality] = relpath
 
     rows: list[dict[str, Any]] = []
@@ -272,6 +298,7 @@ def collect_records_wide(dataset_root: Path) -> tuple[pd.DataFrame, dict[str, An
         'orphans': orphans,
         'missing_modality_dirs': missing_modality_dirs,
         'unknown_class_dirs': unknown_class_dirs,
+        'key_collisions': key_collisions,
     }
     return df, diagnostics
 
@@ -381,6 +408,220 @@ def video_meta_check(
     }
 
 
+def cross_modality_alignment_check(df: pd.DataFrame, dataset_root: Path) -> dict[str, Any]:
+    '''Compare frame counts across the modalities present in each manifest row.
+
+    A row whose modalities disagree on length is *not* proof of a defect: THETIS
+    renders each modality with its own pipeline, so trims legitimately differ by
+    a few frames. But it is the signature a mis-paired take leaves, so the rows
+    are surfaced for inspection instead of being silently accepted — the same
+    principle as ``key_collisions``, which catches only the subset where the
+    filenames also collide.
+
+    Reading a frame count is a header read, not a decode, but it still opens
+    every file — so this runs only under ``--full-integrity``.
+    '''
+    try:
+        import cv2  # type: ignore  # noqa: PLC0415
+    except ImportError:
+        return {'checked_rows': 0, 'mismatched': [], 'skipped_reason': 'opencv-python not installed'}
+
+    frames: dict[str, int] = {}
+
+    def frame_count(relpath: str) -> int:
+        if relpath not in frames:
+            cap = cv2.VideoCapture(str(dataset_root / relpath))
+            frames[relpath] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            cap.release()
+        return frames[relpath]
+
+    mismatched: list[dict[str, Any]] = []
+    checked = 0
+    for row in df.itertuples(index=False):
+        by_modality = {
+            modality: frame_count(getattr(row, PATH_COLUMNS[modality]))
+            for modality in MODALITIES
+            if getattr(row, PATH_COLUMNS[modality], '')
+        }
+        if len(by_modality) < 2:
+            continue
+        checked += 1
+        counts = set(by_modality.values())
+        if len(counts) > 1:
+            mismatched.append(
+                {
+                    'sample_id': row.sample_id,
+                    'frames_by_modality': by_modality,
+                    'spread': max(counts) - min(counts),
+                }
+            )
+
+    return {'checked_rows': checked, 'mismatched': mismatched}
+
+
+def duplicate_files_check(df: pd.DataFrame, dataset_root: Path) -> dict[str, Any]:
+    '''Find byte-identical clips shipped under different names.
+
+    THETIS pads missing repetitions by copying a sibling take, and the copies do
+    not always agree across modalities — a row can end up with depth from take 2
+    and mask from take 1, or (once) a mask belonging to a different subject
+    entirely. Duplicates also let an episode draw the same clip into both support
+    and query, which flatters accuracy.
+
+    The candidate list comes from the manifest, not from a directory walk, so
+    the check sees exactly the clips training would sample — and stays correct
+    when only one modality's folder is present (a Colab/Kaggle upload).
+
+    Hashing is two-stage: group by file size first (a stat call), then hash only
+    inside groups sharing a size — so the ~13 GB tree is not read in full.
+    '''
+    relpaths = {
+        getattr(row, PATH_COLUMNS[modality], '')
+        for row in df.itertuples(index=False)
+        for modality in MODALITIES
+        if getattr(row, PATH_COLUMNS[modality], '')
+    }
+    by_size: dict[int, list[Path]] = defaultdict(list)
+    for relpath in sorted(relpaths):
+        path = dataset_root / relpath
+        if path.is_file():
+            by_size[path.stat().st_size].append(path)
+
+    by_digest: dict[str, list[str]] = defaultdict(list)
+    hashed = 0
+    for paths in by_size.values():
+        if len(paths) < 2:
+            continue  # a unique size cannot have a byte-identical twin
+        for path in paths:
+            digest = hashlib.md5(path.read_bytes()).hexdigest()  # noqa: S324 — dedup, not security
+            by_digest[digest].append(path.relative_to(dataset_root).as_posix())
+            hashed += 1
+
+    groups = sorted(paths for paths in by_digest.values() if len(paths) > 1)
+    return {
+        'files_hashed': hashed,
+        'duplicate_groups': [{'paths': g, 'count': len(g)} for g in groups],
+        'duplicate_file_count': sum(len(g) for g in groups),
+    }
+
+
+def degenerate_clips_check(df: pd.DataFrame, dataset_root: Path) -> dict[str, Any]:
+    '''Find clips that carry no signal — every frame effectively blank.
+
+    The Kinect player segmentation fails outright on some recordings and writes
+    an all-black ``mask`` video. Those clips are valid files with a valid label
+    and pass every other check, but they teach nothing and pollute an episode's
+    support set. Detected generically (near-zero variance across all frames), so
+    a blank clip in any modality is caught, not just ``mask``.
+
+    Only runs under ``--full-integrity`` — it decodes every clip.
+    '''
+    try:
+        import cv2  # type: ignore  # noqa: PLC0415
+    except ImportError:
+        return {'checked_clips': 0, 'blank_clips': [], 'skipped_reason': 'opencv-python not installed'}
+
+    blank: list[dict[str, Any]] = []
+    checked = 0
+    for row in df.itertuples(index=False):
+        for modality in MODALITIES:
+            relpath = getattr(row, PATH_COLUMNS[modality], '')
+            if not relpath:
+                continue
+            checked += 1
+            cap = cv2.VideoCapture(str(dataset_root / relpath))
+            peak = 0.0
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                peak = max(peak, float(frame.max()))
+                if peak >= 8.0:
+                    break  # one bright pixel settles it — no need to decode the rest
+            cap.release()
+            if peak < 8.0:  # nothing brighter than sensor noise in any frame
+                blank.append(
+                    {'sample_id': row.sample_id, 'modality': modality, 'path': relpath}
+                )
+
+    return {'checked_clips': checked, 'blank_clips': blank}
+
+
+def build_exclusions(report: dict[str, Any], df: pd.DataFrame) -> dict[str, Any]:
+    '''Turn integrity findings into a per-modality list of clips to skip.
+
+    Two rules, both aimed at episodic sampling:
+
+    * **blank clips** — no signal to learn from (``degenerate_clips_check``).
+    * **byte-identical duplicates** — THETIS pads missing repetitions by copying
+      a sibling take, so the same footage can be drawn into an episode's support
+      *and* query set, which flatters accuracy. One representative per group is
+      kept (lowest ``sample_id``, so the choice is stable across runs) and the
+      copies are dropped.
+
+    Rows whose modalities come from different takes are reported but **not**
+    excluded: each clip is still a valid example of its own modality, and the
+    single-modality configs never pair them. The list is there for the
+    multimodal work, where those rows must go.
+    '''
+    by_path: dict[str, tuple[str, str]] = {}
+    for row in df.itertuples(index=False):
+        for modality in MODALITIES:
+            relpath = getattr(row, PATH_COLUMNS[modality], '')
+            if relpath:
+                by_path[relpath] = (row.sample_id, modality)
+
+    excluded: dict[str, dict[str, str]] = {modality: {} for modality in MODALITIES}
+
+    for entry in report.get('degenerate_clips', {}).get('blank_clips', []):
+        excluded[entry['modality']][entry['sample_id']] = 'blank'
+
+    for group in report.get('duplicate_files', {}).get('duplicate_groups', []):
+        members = [by_path[p] for p in group['paths'] if p in by_path]
+        by_modality: dict[str, list[str]] = defaultdict(list)
+        for sample_id, modality in members:
+            by_modality[modality].append(sample_id)
+        for modality, sample_ids in by_modality.items():
+            if len(sample_ids) < 2:
+                continue
+            for sample_id in sorted(sample_ids)[1:]:  # keep the first, drop the copies
+                excluded[modality].setdefault(sample_id, 'duplicate')
+
+    inconsistent: list[dict[str, Any]] = []
+    for group in report.get('duplicate_files', {}).get('duplicate_groups', []):
+        members = [by_path[p] for p in group['paths'] if p in by_path]
+        sample_ids = {sample_id for sample_id, _ in members}
+        if len(sample_ids) > 1:
+            inconsistent.append(
+                {
+                    'sample_ids': sorted(sample_ids),
+                    'shared_modalities': sorted({m for _, m in members}),
+                }
+            )
+
+    return {
+        'excluded_by_modality': {m: dict(sorted(v.items())) for m, v in excluded.items()},
+        'counts': {m: len(v) for m, v in excluded.items()},
+        'rows_sharing_clips_across_takes': inconsistent,
+    }
+
+
+def load_exclusions(manifest_path: str | Path, modality: str, enabled: bool = True) -> frozenset[str]:
+    '''Read the ``excluded_clips.json`` that sits next to ``manifest_path``.
+
+    Returns the sample_ids to drop for ``modality``. Missing file (or
+    ``enabled=False``) yields an empty set, so a tree that never ran
+    ``--full-integrity`` still trains — just without the filter.
+    '''
+    if not enabled:
+        return frozenset()
+    path = Path(manifest_path).parent / 'excluded_clips.json'
+    if not path.is_file():
+        return frozenset()
+    payload = json.loads(path.read_text())
+    return frozenset(payload.get('excluded_by_modality', {}).get(modality, {}))
+
+
 def build_integrity_report(
     df: pd.DataFrame,
     diagnostics: dict[str, Any],
@@ -442,9 +683,29 @@ def build_integrity_report(
 
     rng = np.random.default_rng(seed)
     meta_check = video_meta_check(df, dataset_root, rng=rng, full=full_integrity)
+    alignment = (
+        cross_modality_alignment_check(df, dataset_root)
+        if full_integrity and not df.empty
+        else {'checked_rows': 0, 'mismatched': [], 'skipped_reason': 'run with --full-integrity'}
+    )
+    degenerate = (
+        degenerate_clips_check(df, dataset_root)
+        if full_integrity and not df.empty
+        else {'checked_clips': 0, 'blank_clips': [], 'skipped_reason': 'run with --full-integrity'}
+    )
+    duplicates = (
+        duplicate_files_check(df, dataset_root)
+        if full_integrity and not df.empty
+        else {
+            'files_hashed': 0,
+            'duplicate_groups': [],
+            'duplicate_file_count': 0,
+            'skipped_reason': 'run with --full-integrity',
+        }
+    )
 
     return {
-        'schema_version': '1.0',
+        'schema_version': '1.4',  # +key_collisions, alignment, duplicate_files, degenerate_clips  
         'generated_at': _dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds'),
         'dataset_root': str(dataset_root),
         'seed': int(seed),
@@ -466,6 +727,10 @@ def build_integrity_report(
         'action_mismatches': diagnostics['action_mismatches'],
         'missing_modality_dirs': diagnostics['missing_modality_dirs'],
         'unknown_class_dirs': diagnostics['unknown_class_dirs'],
+        'key_collisions': diagnostics.get('key_collisions', []),
+        'cross_modality_alignment': alignment,
+        'duplicate_files': duplicates,
+        'degenerate_clips': degenerate,
     }
 
 
@@ -522,16 +787,62 @@ def main(argv: Sequence[str] | None = None) -> int:
     counts_path = out_root / 'counts_by_modality_action.csv'
     report_path = out_root / 'integrity_report.json'
     label_path = out_root / 'label_to_index.json'
+    exclusions_path = out_root / 'excluded_clips.json'
+
+    exclusions = build_exclusions(report, df)
 
     df.to_csv(manifest_path, index=False)
     counts.to_csv(counts_path, index=False)
     report_path.write_text(json.dumps(report, indent=2))
     write_label_index(label_path)
+    exclusions_path.write_text(json.dumps(exclusions, indent=2))
 
     print(f'manifest:           {manifest_path}  ({len(df)} rows)')
     print(f'counts:             {counts_path}')
     print(f'integrity_report:   {report_path}')
     print(f'label_to_index:     {label_path}')
+    print(f'excluded_clips:     {exclusions_path}  ({exclusions["counts"]})')
+    if not args.full_integrity:
+        print('  (empty — the checks that feed it need --full-integrity)')
+
+    collisions = report['key_collisions']
+    if collisions:
+        print(
+            f'\nWARNING: {len(collisions)} key collision(s) — two files parsed to the same '
+            f'(actor, action, sequence). The dropped clip is missing from the manifest, and '
+            f'the kept one may be a different take than the sibling modalities at that key:'
+        )
+        for c in collisions:
+            print(f"  [{c['modality']}] {c['actor']}/{c['action_label']}/s{c['sequence_idx']}")
+            print(f"      kept:    {c['kept']}")
+            print(f"      dropped: {c['dropped']}")
+        print('  Fix by renaming the files to their true sequence index, then re-run.')
+
+    misaligned = report['cross_modality_alignment']['mismatched']
+    if misaligned:
+        print(
+            f'\nNOTE: {len(misaligned)} row(s) whose modalities disagree on frame count. '
+            f'Some are harmless trim differences between rendering pipelines; others mark a row '
+            f'whose modalities come from different takes — cross-check duplicate_files below and '
+            f'see integrity_report.json > cross_modality_alignment.'
+        )
+        for m in sorted(misaligned, key=lambda x: -x['spread'])[:5]:
+            print(f"  {m['sample_id']} (spread {m['spread']}): {m['frames_by_modality']}")
+        if len(misaligned) > 5:
+            print(f'  ... and {len(misaligned) - 5} more')
+
+    dup = report['duplicate_files']['duplicate_groups']
+    if dup:
+        n_files = report['duplicate_files']['duplicate_file_count']
+        print(
+            f'\nNOTE: {len(dup)} group(s) of byte-identical clips ({n_files} files). THETIS pads '
+            f'missing repetitions with copies of a sibling take; when the copies come from '
+            f'different takes per modality, that row is internally inconsistent:'
+        )
+        for g in dup[:5]:
+            print('  ' + '  ==  '.join(Path(x).name for x in g['paths']))
+        if len(dup) > 5:
+            print(f'  ... and {len(dup) - 5} more — see integrity_report.json > duplicate_files')
     return 0
 
 

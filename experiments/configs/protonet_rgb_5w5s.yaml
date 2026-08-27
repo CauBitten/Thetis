@@ -1,5 +1,8 @@
-# ProtoNet baseline on RGB, 5-way 5-shot for meta_train; 3-way for val/test (12-class budget).
+# ProtoNet · rgb · 5-way 5-shot (meta_val/meta_test rodam 3-way; split 6/3/3).
+# Vídeo RGB nativo (cobertura 100%: 165 clipes/classe).
+# Documentação de todas as chaves: experiments/configs/README.md
 method: protonet
+run_id: protonet_rgb_5w5s
 
 modalities:
   - rgb
@@ -7,13 +10,7 @@ modalities:
 encoder:
   name: r2plus1d_18
   pretrained: true
-  # batch_size controls chunked-encoding: how many videos go through the
-  # encoder per forward. Lower it if you hit CUDA OOM. Auto-picks 4 (<=6 GB),
-  # 8 (<=10 GB), 16 (<=16 GB), 32 (>16 GB) when omitted.
-  batch_size: 8
-  # Re-compute activations during backward (~70% less activation VRAM, ~25-30%
-  # slower/step). Auto-enables on <=6 GB GPUs; forced on here so R(2+1)D-18 also
-  # fits comfortably on mid-size GPUs. Comment out if optim.stream_query alone fits.
+  batch_size: 16
   gradient_checkpointing: true
 
 episode:
@@ -31,8 +28,8 @@ optim:
   learning_rate: 0.0001
   weight_decay: 0.0
   eval_every: 5
-  fp16: true  # autocast mixed precision (CUDA only); halves activation memory
-  stream_query: true  # stream query in micro-batches w/ grad accumulation (bounds VRAM)
+  fp16: true
+  stream_query: true
 
 data:
   manifest_path: data/processed/manifest.csv
@@ -43,10 +40,7 @@ data:
   frame_count: 16
   resize_size: 128
   spatial_size: 112
-  # Decode each clip once, resize to resize_size, then serve from RAM. Episodic
-  # sampling reuses the same ~990-clip train pool thousands of times, so this
-  # removes the dominant video-decode bottleneck (results are unchanged). Costs
-  # ~1.9 GB RAM at 128^2. Set false only if memory-constrained.
   cache_decoded: true
+  exclude_defective: true      # pula clipes em branco e duplicatas byte a byte do THETIS
 
 seed: 42

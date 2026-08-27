@@ -25,16 +25,16 @@ TEST_PATH ?= tests/
 
 help:
 	@echo "Available targets:"
-	@echo "  make preprocess        # build manifest, integrity report, and label index"
+	@echo "  make preprocess        # manifest + integrity report + label index + exclusion list"
 	@echo "  make episodes          # sample N-way K-shot episodes (uniform n_way across splits)"
 	@echo "  make episodes-6-3-3    # sample episodes with 6/3/3 class split + asymmetric n_way (5/3/3)"
-	@echo "  make train             # meta-train with TRAIN_CONFIG (default: protonet_rgb_5w5s)"
+	@echo "  make train             # meta-train with TRAIN_CONFIG (default: protonet_rgb_5w1s)"
 	@echo "  make eval              # evaluate CHECKPOINT on meta_test"
 	@echo "  make test              # run test suite"
 	@echo "  make clean             # remove generated artifacts"
 
 preprocess:
-	$(UV) run $(PYTHON) src/data/loader.py --input $(DATASET_DIR) --output $(DATA_DIR) --seed $(SEED)
+	$(UV) run $(PYTHON) src/data/loader.py --input $(DATASET_DIR) --output $(DATA_DIR) --seed $(SEED) --full-integrity
 
 episodes:
 	$(UV) run $(PYTHON) src/data/episode_sampler.py \

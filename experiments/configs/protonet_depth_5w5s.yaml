@@ -1,11 +1,11 @@
-# ProtoNet · skeleton3d · 5-way 5-shot (meta_val/meta_test rodam 3-way; split 6/3/3).
-# Vídeo de VISUALIZAÇÃO do esqueleto 3D, não coordenadas de junta (cobertura ~61%: 93-110 clipes/classe).
+# ProtoNet · depth · 5-way 5-shot (meta_val/meta_test rodam 3-way; split 6/3/3).
+# Mapa de profundidade renderizado em vídeo (cobertura 100%: 165 clipes/classe).
 # Documentação de todas as chaves: experiments/configs/README.md
 method: protonet
-run_id: protonet_skeleton3d_5w5s
+run_id: protonet_depth_5w5s
 
 modalities:
-  - skeleton_3d
+  - depth
 
 encoder:
   name: r2plus1d_18

@@ -30,7 +30,12 @@ if __package__ in (None, ''):
         sys.path.insert(0, str(_REPO_ROOT))
 
 from src.data.episode_sampler import EpisodeSampler  # noqa: E402
-from src.data.loader import ACTION_LABELS, PATH_COLUMNS, ThetisDataset  # noqa: E402
+from src.data.loader import (  # noqa: E402
+    ACTION_LABELS,
+    PATH_COLUMNS,
+    ThetisDataset,
+    load_exclusions,
+)
 from src.models.encoders import VideoEncoder  # noqa: E402
 from src.models.protonet import ProtoNet  # noqa: E402
 from src.training.meta_trainer import (  # noqa: E402
@@ -80,15 +85,22 @@ def _iter_episodes_from_sampler(
     )
     ep_cfg = cfg['episode']
     n_way_test = int(ep_cfg.get('n_way_test', ep_cfg['n_way']))
+    manifest_path = Path(cfg['data']['manifest_path']).resolve()
+    modality = cfg['modalities'][0]
     sampler = EpisodeSampler(
-        manifest_path=Path(cfg['data']['manifest_path']).resolve(),
+        manifest_path=manifest_path,
         n_way=n_way_test,
         k_shot=int(ep_cfg['k_shot']),
         q_query=int(ep_cfg['q_query']),
         splits=splits,
         seed=seed + 2,
         speed_split='none',
-        modality=cfg['modalities'][0],
+        modality=modality,
+        # same filter as training, so meta_test is not scored on blank clips or
+        # on footage duplicated into both support and query
+        exclude=load_exclusions(
+            manifest_path, modality, enabled=bool(cfg['data'].get('exclude_defective', True))
+        ),
         strict=False,
     )
     eps = [sampler.sample_episode('meta_test', i) for i in range(n_episodes)]

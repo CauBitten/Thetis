@@ -1,6 +1,7 @@
 '''Tests for src/data/loader.py — parsing, manifest, ThetisDataset.'''
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -12,8 +13,13 @@ from src.data.loader import (
     PATH_COLUMNS,
     REQUIRED_COLUMNS,
     ThetisDataset,
+    build_integrity_report,
     canonical_action,
     collect_records_wide,
+    cross_modality_alignment_check,
+    build_exclusions,
+    duplicate_files_check,
+    load_exclusions,
     infer_action_from_token,
     infer_skill_level,
     parse_actor_and_sequence,
@@ -135,6 +141,169 @@ def test_collect_records_wide_synthetic(mock_dataset_tree: Path) -> None:
     assert diag['parse_failures'] == []
     assert diag['action_mismatches'] == []
     assert diag['unknown_class_dirs'] == []
+
+
+def test_collect_records_wide_reports_key_collisions(tmp_path: Path) -> None:
+    '''Two files of one modality parsing to the same key must not vanish silently.
+
+    THETIS ships this case: ``p19_bvolley_skelet2D_s3 (1).avi`` and ``(2).avi``
+    are different takes whose ``' (N)'`` suffix is stripped during parsing, so
+    both land on ``(p19, backhand_volley, 3)`` and the last one wins.
+    '''
+    d = tmp_path / 'VIDEO_Skelet2D' / 'backhand_volley'
+    d.mkdir(parents=True)
+    (d / 'p19_bvolley_skelet2D_s3 (1).avi').write_bytes(b'take3')
+    (d / 'p19_bvolley_skelet2D_s3 (2).avi').write_bytes(b'take2')
+
+    df, diag = collect_records_wide(tmp_path)
+
+    # a colisão colapsa as duas em uma linha só
+    assert len(df) == 1
+    collisions = diag['key_collisions']
+    assert len(collisions) == 1
+    c = collisions[0]
+    assert c['modality'] == 'skeleton_2d'
+    assert (c['actor'], c['action_label'], c['sequence_idx']) == ('p19', 'backhand_volley', 3)
+    # ordem alfabética: (2) é processado por último e sobrescreve (1)
+    assert c['kept'].endswith('(2).avi')
+    assert c['dropped'].endswith('(1).avi')
+    assert df.iloc[0]['path_skeleton_2d'] == c['kept']
+
+
+def test_collect_records_wide_no_collisions_when_names_are_distinct(tmp_path: Path) -> None:
+    d = tmp_path / 'VIDEO_Skelet2D' / 'backhand_volley'
+    d.mkdir(parents=True)
+    (d / 'p19_bvolley_skelet2D_s2.avi').write_bytes(b'take2')
+    (d / 'p19_bvolley_skelet2D_s3.avi').write_bytes(b'take3')
+
+    df, diag = collect_records_wide(tmp_path)
+
+    assert len(df) == 2
+    assert diag['key_collisions'] == []
+
+
+def test_cross_modality_alignment_flags_frame_count_disagreement(tmp_path: Path) -> None:
+    '''Rows whose modalities disagree on length are surfaced, not swallowed.'''
+    import numpy as np
+    import pandas as pd
+    import pytest as _pytest
+
+    cv2 = _pytest.importorskip('cv2')
+
+    def write_video(path: Path, n_frames: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        w = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*'MJPG'), 10.0, (32, 32))
+        for _ in range(n_frames):
+            w.write(np.zeros((32, 32, 3), dtype=np.uint8))
+        w.release()
+
+    write_video(tmp_path / 'VIDEO_RGB' / 'smash' / 'p1_smash_s1.avi', 10)
+    write_video(tmp_path / 'VIDEO_Depth' / 'smash' / 'p1_smash_depth_s1.avi', 10)
+    write_video(tmp_path / 'VIDEO_RGB' / 'smash' / 'p1_smash_s2.avi', 10)
+    write_video(tmp_path / 'VIDEO_Depth' / 'smash' / 'p1_smash_depth_s2.avi', 7)
+
+    df, _ = collect_records_wide(tmp_path)
+    result = cross_modality_alignment_check(df, tmp_path)
+
+    assert result['checked_rows'] == 2
+    ids = {m['sample_id'] for m in result['mismatched']}
+    assert ids == {'p1_smash_s2'}, f'esperava so s2 desalinhado, veio {ids}'
+    assert result['mismatched'][0]['spread'] == 3
+
+
+def test_cross_modality_alignment_skipped_without_full_integrity(mock_dataset_tree: Path) -> None:
+    df, diagnostics = collect_records_wide(mock_dataset_tree)
+    report = build_integrity_report(df, diagnostics, mock_dataset_tree, seed=42, full_integrity=False)
+    assert report['cross_modality_alignment']['mismatched'] == []
+    assert 'skipped_reason' in report['cross_modality_alignment']
+    assert report['key_collisions'] == []
+
+
+def test_duplicate_files_check_finds_byte_identical_clips(tmp_path: Path) -> None:
+    '''THETIS pads missing repetitions with copies; those must be reported.'''
+    d = tmp_path / 'VIDEO_RGB' / 'smash'
+    d.mkdir(parents=True)
+    (d / 'p1_smash_s1.avi').write_bytes(b'TAKE-ONE-BYTES')
+    (d / 'p1_smash_s2.avi').write_bytes(b'TAKE-ONE-BYTES')  # cópia byte a byte
+    (d / 'p1_smash_s3.avi').write_bytes(b'a-genuinely-different-take')
+
+    df, _ = collect_records_wide(tmp_path)
+    result = duplicate_files_check(df, tmp_path)
+
+    assert result['duplicate_file_count'] == 2
+    assert len(result['duplicate_groups']) == 1
+    paths = result['duplicate_groups'][0]['paths']
+    assert sorted(Path(p).name for p in paths) == ['p1_smash_s1.avi', 'p1_smash_s2.avi']
+    # pré-filtro por tamanho: o clipe de tamanho único nem chega a ser lido
+    assert result['files_hashed'] == 2
+
+
+def test_duplicate_files_check_clean_tree(mock_dataset_tree: Path) -> None:
+    # a árvore sintética usa os mesmos bytes em todo arquivo, então serve de
+    # verificação de que o agrupamento é por conteúdo e não por nome
+    df, _ = collect_records_wide(mock_dataset_tree)
+    result = duplicate_files_check(df, mock_dataset_tree)
+    assert result['duplicate_file_count'] == 10
+    assert len(result['duplicate_groups']) == 1
+
+
+def test_build_exclusions_keeps_one_of_each_duplicate_group() -> None:
+    df = pd.DataFrame(
+        [
+            {'sample_id': 'p1_smash_s1', 'path_rgb': 'VIDEO_RGB/smash/a.avi', 'path_depth': '',
+             'path_mask': '', 'path_skeleton_2d': '', 'path_skeleton_3d': ''},
+            {'sample_id': 'p1_smash_s2', 'path_rgb': 'VIDEO_RGB/smash/b.avi', 'path_depth': '',
+             'path_mask': '', 'path_skeleton_2d': '', 'path_skeleton_3d': ''},
+            {'sample_id': 'p1_smash_s3', 'path_rgb': 'VIDEO_RGB/smash/c.avi', 'path_depth': '',
+             'path_mask': '', 'path_skeleton_2d': '', 'path_skeleton_3d': ''},
+        ]
+    )
+    report = {
+        'duplicate_files': {
+            'duplicate_groups': [
+                {'paths': ['VIDEO_RGB/smash/a.avi', 'VIDEO_RGB/smash/b.avi'], 'count': 2}
+            ]
+        },
+        'degenerate_clips': {'blank_clips': [{'sample_id': 'p1_smash_s3', 'modality': 'rgb',
+                                              'path': 'VIDEO_RGB/smash/c.avi'}]},
+    }
+    out = build_exclusions(report, df)
+    rgb = out['excluded_by_modality']['rgb']
+    # do par duplicado sobra um representante; o clipe em branco sai
+    assert rgb == {'p1_smash_s2': 'duplicate', 'p1_smash_s3': 'blank'}
+    assert out['counts']['rgb'] == 2
+    assert out['counts']['depth'] == 0
+
+
+def test_build_exclusions_flags_rows_sharing_clips_without_excluding_them() -> None:
+    df = pd.DataFrame(
+        [
+            {'sample_id': 'p55_x_s1', 'path_rgb': '', 'path_depth': '', 'path_mask': 'M/s1.avi',
+             'path_skeleton_2d': '', 'path_skeleton_3d': ''},
+            {'sample_id': 'p55_x_s3', 'path_rgb': '', 'path_depth': '', 'path_mask': 'M/s3.avi',
+             'path_skeleton_2d': '', 'path_skeleton_3d': ''},
+        ]
+    )
+    report = {'duplicate_files': {'duplicate_groups': [{'paths': ['M/s1.avi', 'M/s3.avi'], 'count': 2}]}}
+    out = build_exclusions(report, df)
+    assert out['rows_sharing_clips_across_takes'] == [
+        {'sample_ids': ['p55_x_s1', 'p55_x_s3'], 'shared_modalities': ['mask']}
+    ]
+
+
+def test_load_exclusions_missing_file_is_not_fatal(tmp_path: Path) -> None:
+    (tmp_path / 'manifest.csv').write_text('sample_id\n')
+    assert load_exclusions(tmp_path / 'manifest.csv', 'rgb') == frozenset()
+
+
+def test_load_exclusions_reads_requested_modality(tmp_path: Path) -> None:
+    (tmp_path / 'manifest.csv').write_text('sample_id\n')
+    (tmp_path / 'excluded_clips.json').write_text(json.dumps({
+        'excluded_by_modality': {'rgb': {'a': 'blank'}, 'mask': {'b': 'duplicate', 'c': 'blank'}}
+    }))
+    assert load_exclusions(tmp_path / 'manifest.csv', 'mask') == frozenset({'b', 'c'})
+    assert load_exclusions(tmp_path / 'manifest.csv', 'depth') == frozenset()
+    assert load_exclusions(tmp_path / 'manifest.csv', 'mask', enabled=False) == frozenset()
 
 
 def test_collect_records_wide_skips_unknown_class_dirs(tmp_path: Path) -> None:

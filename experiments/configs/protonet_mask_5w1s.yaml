@@ -1,11 +1,11 @@
-# ProtoNet · skeleton3d · 5-way 5-shot (meta_val/meta_test rodam 3-way; split 6/3/3).
-# Vídeo de VISUALIZAÇÃO do esqueleto 3D, não coordenadas de junta (cobertura ~61%: 93-110 clipes/classe).
+# ProtoNet · mask · 5-way 1-shot (meta_val/meta_test rodam 3-way; split 6/3/3).
+# Silhueta binária renderizada em vídeo (cobertura 100%: 165 clipes/classe).
 # Documentação de todas as chaves: experiments/configs/README.md
 method: protonet
-run_id: protonet_skeleton3d_5w5s
+run_id: protonet_mask_5w1s
 
 modalities:
-  - skeleton_3d
+  - mask
 
 encoder:
   name: r2plus1d_18
@@ -17,7 +17,7 @@ episode:
   n_way: 5
   n_way_val: 3
   n_way_test: 3
-  k_shot: 5
+  k_shot: 1
   q_query: 15
   episodes_per_epoch: 200
   episodes_meta_val: 100

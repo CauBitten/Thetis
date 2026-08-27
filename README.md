@@ -107,6 +107,7 @@ Thetis/
 │
 ├── experiments/
 │   ├── configs/                # Um .yaml por experimento (método × modalidade × N × K)
+│   │   └── README.md           # Referência das chaves de config (defaults, VRAM, limitações)
 │   └── logs/                   # Logs de meta-treino (gerados automaticamente)
 │
 ├── outputs/
@@ -171,7 +172,21 @@ uv run python src/features/text.py         --output data/processed/text/
 Isso gera, entre outros artefatos:
 
 - `data/processed/manifest.csv`: tabela por amostra (sujeito, ação, modalidade, sequência, caminho).
+- `data/processed/excluded_clips.json`: clipes descartados da amostragem por
+  modalidade (em branco e duplicatas byte a byte). Consumido pelo sampler quando
+  `data.exclude_defective: true`, que é o padrão nos 10 configs.
 - `data/processed/integrity_report.json`: relatório de integridade e cobertura por modalidade/classe.
+  Inclui três checagens de defeito de dados: `key_collisions` (dois arquivos da
+  mesma modalidade caindo na mesma chave `(actor, ação, sequência)`),
+  `duplicate_files` (clipes byte a byte idênticos — o THETIS preenche repetições
+  faltantes copiando outro take: 28 grupos, 56 arquivos) e
+  `cross_modality_alignment` (linhas cujas modalidades discordam na contagem de
+  frames) e `degenerate_clips` (vídeos totalmente em branco — a segmentação do
+  Kinect falha e grava 27 máscaras 100% pretas). Essas exigem `--full-integrity`.
+  O `make preprocess` imprime um resumo. Ver
+  [`experiments/configs/README.md`](experiments/configs/README.md) para o que cada
+  uma significa, o defeito já corrigido no `skeleton_2d` e o impacto medido em
+  cada modalidade.
 - `data/processed/counts_by_modality_action.csv`: contagens por modalidade e ação.
 - `data/processed/pose/`, `data/processed/flow/`, `data/processed/text/`: features das modalidades complementares.
 
@@ -341,25 +356,69 @@ Cada arquivo de vídeo segue o padrão `{actor}_{action}_{sequence}.avi`.
 
 ## Configuração de experimentos
 
-Cada experimento é definido por um arquivo `.yaml` em `experiments/configs/`. Exemplo:
+Cada experimento é definido por um arquivo `.yaml` em `experiments/configs/`.
+Todos seguem o **mesmo schema**, com todas as chaves lidas pelo código escritas
+explicitamente — entre dois configs quaisquer só mudam `run_id`, `modalities` e
+`episode.k_shot`. A referência completa de cada chave (defaults, efeito em
+VRAM/velocidade, limitações conhecidas) está em
+[`experiments/configs/README.md`](experiments/configs/README.md).
 
 ```yaml
 # experiments/configs/protonet_skeleton3d_5w5s.yaml
 method: protonet              # protonet | trx | mvp_shot | safsar | vpd | ...
-modalities:                   # uma ou mais; SAFSAR usa video + text
+run_id: protonet_skeleton3d_5w5s   # fixa outputs/checkpoints/<run_id> e logs/<run_id>
+
+modalities:                   # a Fase 2 aceita uma modalidade por config
   - skeleton_3d
+
+encoder:
+  name: r2plus1d_18
+  pretrained: true
+  batch_size: 8               # vídeos por forward; principal knob de OOM
+  gradient_checkpointing: true
+
 episode:
   n_way: 5
+  n_way_val: 3                # split 6/3/3: val/test rodam 3-way
+  n_way_test: 3
   k_shot: 5
   q_query: 15
   episodes_per_epoch: 200
+  episodes_meta_val: 100
   episodes_meta_test: 1000
+
 optim:
   epochs: 100
-  batch_size: 1               # batch é o episódio; ajuste conforme método
-  learning_rate: 0.001
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  eval_every: 5
+  fp16: true                  # autocast AMP (CUDA)
+  stream_query: true          # query em micro-batches + acumulação de gradiente
+
+data:
+  manifest_path: data/processed/manifest.csv
+  dataset_root: dataset
+  train_classes: 6
+  val_classes: 3
+  test_classes: 3
+  frame_count: 16
+  resize_size: 128
+  spatial_size: 112
+  cache_decoded: true         # decode 1x -> RAM (~1,9 GB); remove o gargalo de I/O
+
 seed: 42
 ```
+
+O baseline ProtoNet cobre as 5 modalidades × {1-shot, 5-shot} — 10 configs, um
+por combinação:
+
+| Modalidade | 5-way 1-shot | 5-way 5-shot |
+| --- | --- | --- |
+| `rgb` | `protonet_rgb_5w1s.yaml` | `protonet_rgb_5w5s.yaml` |
+| `depth` | `protonet_depth_5w1s.yaml` | `protonet_depth_5w5s.yaml` |
+| `mask` | `protonet_mask_5w1s.yaml` | `protonet_mask_5w5s.yaml` |
+| `skeleton_2d` | `protonet_skeleton2d_5w1s.yaml` | `protonet_skeleton2d_5w5s.yaml` |
+| `skeleton_3d` | `protonet_skeleton3d_5w1s.yaml` | `protonet_skeleton3d_5w5s.yaml` |
 
 Cenários previstos:
 
